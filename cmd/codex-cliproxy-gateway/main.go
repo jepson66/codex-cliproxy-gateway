@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"codex-cliproxy-gateway/internal/catalog"
 	"codex-cliproxy-gateway/internal/config"
+	"codex-cliproxy-gateway/internal/diagnostics"
 	"codex-cliproxy-gateway/internal/gateway"
 	"codex-cliproxy-gateway/internal/install"
 	"codex-cliproxy-gateway/internal/service"
@@ -26,6 +28,8 @@ func main() {
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ExitOnError)
 	configPath := flags.String("config", "", "path to gateway JSON config")
+	e2e := flags.Bool("e2e", false, "perform a minimal billable third-party model request (doctor only)")
+	diagnosticModel := flags.String("model", "", "third-party model id to use with doctor --e2e")
 	_ = flags.Parse(os.Args[2:])
 
 	cfg, err := config.Load(*configPath)
@@ -103,7 +107,7 @@ func main() {
 		}
 		fmt.Println("stopped and removed the Gateway LaunchAgent; config and binary were preserved")
 	case "doctor":
-		doctor(cfg)
+		doctor(cfg, *e2e, *diagnosticModel)
 	case "version", "--version", "-version":
 		fmt.Println(version)
 	default:
@@ -112,41 +116,17 @@ func main() {
 	}
 }
 
-func doctor(cfg config.Config) {
-	checks := []struct {
-		name string
-		err  error
-	}{
-		{"config", cfg.Validate()},
-	}
-	_, catalogErr := catalog.Generate(cfg)
-	checks = append(checks, struct {
-		name string
-		err  error
-	}{"official model cache", catalogErr})
-	_, zstdErr := cfg.ResolveZstdCommand()
-	checks = append(checks, struct {
-		name string
-		err  error
-	}{"zstd request decoder", zstdErr})
-	if _, err := cfg.ResolveCLIProxyAPIKey(); err != nil {
-		checks = append(checks, struct {
-			name string
-			err  error
-		}{"CLIProxyAPI key", err})
-	} else {
-		checks = append(checks, struct {
-			name string
-			err  error
-		}{"CLIProxyAPI key", nil})
-	}
+func doctor(cfg config.Config, e2e bool, model string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	checks := (diagnostics.Runner{}).Run(ctx, cfg, e2e, model)
 	failed := false
 	for _, check := range checks {
-		if check.err != nil {
+		if check.Err != nil {
 			failed = true
-			fmt.Printf("FAIL %-24s %v\n", check.name, check.err)
+			fmt.Printf("FAIL %-24s %v\n", check.Name, check.Err)
 		} else {
-			fmt.Printf("OK   %s\n", check.name)
+			fmt.Printf("OK   %s\n", check.Name)
 		}
 	}
 	if failed {
@@ -155,7 +135,7 @@ func doctor(cfg config.Config) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: codex-cliproxy-gateway <init|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|doctor|version> [--config PATH]")
+	fmt.Fprintln(os.Stderr, "usage: codex-cliproxy-gateway <init|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|doctor|version> [--config PATH] [--e2e] [--model ID]")
 }
 
 func fatal(err error) {

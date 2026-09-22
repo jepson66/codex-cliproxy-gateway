@@ -93,6 +93,7 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	request.Header.Set("OpenAI-Organization", "org-secret")
 	request.Header.Set("OpenAI-Project", "project-secret")
 	request.Header.Set("OpenAI-Actor-Authorization", "actor-secret")
+	request.Header.Set("X-OpenAI-Future-Credential", "future-secret")
 	recorder := newResponseRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 
@@ -106,7 +107,7 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	if got := upstream.header.Get("Authorization"); got != "Bearer local-proxy-key" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	for _, name := range []string{"ChatGPT-Account-ID", "Cookie", "OpenAI-Organization", "OpenAI-Project", "OpenAI-Actor-Authorization"} {
+	for _, name := range []string{"ChatGPT-Account-ID", "Cookie", "OpenAI-Organization", "OpenAI-Project", "OpenAI-Actor-Authorization", "X-OpenAI-Future-Credential"} {
 		if got := upstream.header.Get(name); got != "" {
 			t.Fatalf("%s leaked: %q", name, got)
 		}
@@ -125,6 +126,69 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	}
 	if officialCalled {
 		t.Fatal("official upstream was called for a prefixed model")
+	}
+	if recorder.Header().Get("X-Codex-Cliproxy-Request-ID") == "" {
+		t.Fatal("response has no request correlation id")
+	}
+}
+
+func TestUnknownThirdPartyModelFailsClosed(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	called := false
+	server.cliproxy.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return testResponse(http.StatusOK, "application/json", `{}`), nil
+	})
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/not-configured","input":"hello"}`))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if called {
+		t.Fatal("unknown model reached CLIProxyAPI")
+	}
+}
+
+func TestConfiguredUpstreamModelIsUsed(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	spec := server.modelSpecs["cliproxy/kimi-k3"]
+	spec.UpstreamModel = "moonshot-upstream-id"
+	server.modelSpecs["cliproxy/kimi-k3"] = spec
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"model":"moonshot-upstream-id"`) {
+			t.Fatalf("body = %s", body)
+		}
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello"}`))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestReadinessChecksAuthenticatedCLIProxy(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer local-proxy-key" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		return testResponse(http.StatusOK, "application/json", `{"data":[]}`), nil
+	})
+	request, _ := http.NewRequest(http.MethodGet, "http://gateway.test/readyz", nil)
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

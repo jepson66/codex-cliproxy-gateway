@@ -20,6 +20,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimi(t *testing.T) {
 				"slug":                       "gpt-one",
 				"display_name":               "GPT One",
 				"custom":                     "keep-me",
+				"multi_agent_version":        "future-value-must-not-leak",
 				"supported_reasoning_levels": []any{},
 				"model_messages": map[string]any{
 					"instructions_template":   "You are Codex, an agent based on GPT-5. You and the user share one workspace.\n\nAs Codex, stay helpful.",
@@ -56,6 +57,12 @@ func TestGeneratePreservesOfficialModelsAndAddsKimi(t *testing.T) {
 	}
 	if kimi["default_reasoning_level"] != "none" {
 		t.Fatalf("Kimi default reasoning = %#v", kimi["default_reasoning_level"])
+	}
+	if _, ok := kimi["custom"]; ok {
+		t.Fatalf("Kimi inherited an unknown official field: %#v", kimi["custom"])
+	}
+	if _, ok := kimi["multi_agent_version"]; ok {
+		t.Fatalf("Kimi inherited an undeclared capability: %#v", kimi["multi_agent_version"])
 	}
 	messages, ok := kimi["model_messages"].(map[string]any)
 	if !ok {

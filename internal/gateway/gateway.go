@@ -3,6 +3,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,7 @@ type Server struct {
 	cliproxyKey  string
 	decodeZstd   func([]byte) ([]byte, error)
 	catalog      catalog.Document
+	modelSpecs   map[string]config.ModelSpec
 	sidecar      *exec.Cmd
 	sidecarMutex sync.Mutex
 }
@@ -60,7 +63,13 @@ func New(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		decodeZstd: func(body []byte) ([]byte, error) {
 			return decompressZstd(zstdCommand, body)
 		},
-		catalog: doc,
+		catalog:    doc,
+		modelSpecs: make(map[string]config.ModelSpec),
+	}
+	for _, model := range cfg.Models {
+		if model.Compatibility.Status != "unsupported" {
+			s.modelSpecs[cfg.ModelPrefix+model.ID] = model
+		}
 	}
 	s.official = s.newReverseProxy(officialURL, false)
 	s.cliproxy = s.newReverseProxy(cliproxyURL, true)
@@ -69,7 +78,9 @@ func New(cfg config.Config, logger *slog.Logger) (*Server, error) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /healthz", s.live)
+	mux.HandleFunc("GET /livez", s.live)
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /models", s.models)
 	mux.HandleFunc("GET /v1/models", s.openAIModels)
 	mux.HandleFunc("/", s.route)
@@ -107,11 +118,43 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"models": len(s.catalog.Models),
 	})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.cliproxyKey == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "cliproxy key unavailable"})
+		return
+	}
+	if err := s.checkCLIProxy(r.Context()); err != nil {
+		s.logger.Warn("readiness check failed", "error_class", "cliproxy_unavailable")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "cliproxy unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "models": len(s.catalog.Models)})
+}
+
+func (s *Server) checkCLIProxy(ctx context.Context) error {
+	target := strings.TrimRight(s.cfg.CLIProxyBaseURL, "/") + "/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cliproxyKey)
+	client := &http.Client{Transport: s.cliproxy.Transport, Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("CLIProxyAPI models status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
@@ -157,7 +200,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	model, rewritten, thirdParty, err := routeBody(routingBody, s.cfg.ModelPrefix)
+	model, rewritten, thirdParty, err := routeBody(routingBody, s.cfg.ModelPrefix, s.modelSpecs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -171,15 +214,53 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(rewritten))
 		r.Header.Del("Content-Encoding")
 		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
-		s.logger.Info("routing request", "route", "cliproxy", "model", model)
-		s.cliproxy.ServeHTTP(w, r)
+		s.serveLogged(w, r, s.cliproxy, "cliproxy", model)
 		return
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
-	s.logger.Info("routing request", "route", "official", "model", model)
-	s.official.ServeHTTP(w, r)
+	s.serveLogged(w, r, s.official, "official", model)
+}
+
+func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, handler http.Handler, route, model string) {
+	requestID := newRequestID()
+	w.Header().Set("X-Codex-Cliproxy-Request-ID", requestID)
+	r.Header.Set("X-Codex-Cliproxy-Request-ID", requestID)
+	recorder := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	started := time.Now()
+	handler.ServeHTTP(recorder, r)
+	s.logger.Info("request completed",
+		"request_id", requestID,
+		"route", route,
+		"model", model,
+		"status", recorder.status,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func newRequestID() string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return hex.EncodeToString(value[:])
+	}
+	return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 }
 
 func hasContentEncoding(headers http.Header, expected string) bool {
@@ -224,7 +305,7 @@ func decompressZstd(command string, body []byte) ([]byte, error) {
 	return decoded, nil
 }
 
-func routeBody(body []byte, prefix string) (model string, rewritten []byte, thirdParty bool, err error) {
+func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (model string, rewritten []byte, thirdParty bool, err error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return "", body, false, nil
 	}
@@ -238,11 +319,11 @@ func routeBody(body []byte, prefix string) (model string, rewritten []byte, thir
 	if !strings.HasPrefix(model, prefix) {
 		return model, body, false, nil
 	}
-	upstreamModel := strings.TrimPrefix(model, prefix)
-	if upstreamModel == "" {
-		return model, nil, false, fmt.Errorf("model prefix %q must be followed by a model id", prefix)
+	spec, ok := models[model]
+	if !ok {
+		return model, nil, false, fmt.Errorf("third-party model %q is not configured", model)
 	}
-	rewrittenModel, _ := json.Marshal(upstreamModel)
+	rewrittenModel, _ := json.Marshal(spec.UpstreamModel)
 	payload["model"] = rewrittenModel
 	rewritten, err = json.Marshal(payload)
 	if err != nil {
@@ -253,6 +334,7 @@ func routeBody(body []byte, prefix string) (model string, rewritten []byte, thir
 
 func (s *Server) newReverseProxy(target *url.URL, thirdParty bool) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
+		Transport: defaultTransport(),
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Codex calls the configured base URL under /v1. Both upstream base
 			// URLs already include their own API root, so remove only the local
@@ -289,16 +371,21 @@ func trimAPIPrefix(path string) string {
 }
 
 func stripSensitiveHeaders(headers http.Header) {
-	for _, name := range []string{
-		"Authorization",
-		"ChatGPT-Account-ID",
-		"Cookie",
-		"OpenAI-Organization",
-		"OpenAI-Project",
-		"OpenAI-Actor-Authorization",
-	} {
-		headers.Del(name)
+	for name := range headers {
+		lower := strings.ToLower(name)
+		if lower == "authorization" || lower == "cookie" ||
+			strings.HasPrefix(lower, "chatgpt-") || strings.HasPrefix(lower, "openai-") ||
+			strings.HasPrefix(lower, "x-chatgpt-") || strings.HasPrefix(lower, "x-openai-") {
+			headers.Del(name)
+		}
 	}
+}
+
+func defaultTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.IdleConnTimeout = 120 * time.Second
+	return transport
 }
 
 func removeHopByHop(headers http.Header) {

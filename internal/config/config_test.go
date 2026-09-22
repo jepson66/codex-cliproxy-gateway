@@ -3,8 +3,83 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestLoadMigratesLegacyConfigInMemory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{
+  "models": [{
+    "id": "legacy-model",
+    "display_name": "Legacy",
+    "context_window": 32000,
+    "input_modalities": ["text"],
+    "reasoning_levels": ["none"]
+  }]
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schema version = %d", cfg.SchemaVersion)
+	}
+	model := cfg.Models[0]
+	if model.Route != "cliproxy" || model.UpstreamModel != "legacy-model" || model.WireAPI != "responses" {
+		t.Fatalf("legacy defaults = %#v", model)
+	}
+	if !model.Capabilities.Streaming || !model.Capabilities.Tools {
+		t.Fatalf("legacy capabilities were not preserved: %#v", model.Capabilities)
+	}
+}
+
+func TestLoadRejectsUnknownFieldAndFutureSchema(t *testing.T) {
+	dir := t.TempDir()
+	unknownPath := filepath.Join(dir, "unknown.json")
+	if err := os.WriteFile(unknownPath, []byte(`{"schema_version":1,"unknown":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(unknownPath); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+
+	futurePath := filepath.Join(dir, "future.json")
+	if err := os.WriteFile(futurePath, []byte(`{"schema_version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(futurePath); err == nil || !strings.Contains(err.Error(), "unsupported schema_version") {
+		t.Fatalf("future schema error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeListenAndInvalidCapabilities(t *testing.T) {
+	cfg := Default()
+	cfg.Listen = "0.0.0.0:8765"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "not loopback") {
+		t.Fatalf("unsafe listen error = %v", err)
+	}
+	cfg.AllowNonLoopback = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit non-loopback opt-in: %v", err)
+	}
+
+	cfg = Default()
+	cfg.Models[0].Capabilities.Streaming = false
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "streaming must be true") {
+		t.Fatalf("streaming error = %v", err)
+	}
+
+	cfg = Default()
+	cfg.Models = append(cfg.Models, cfg.Models[0])
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("duplicate model error = %v", err)
+	}
+}
 
 func TestResolveCLIProxyAPIKeyPrefersEnvironmentThenFile(t *testing.T) {
 	dir := t.TempDir()

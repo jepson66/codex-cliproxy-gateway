@@ -1,5 +1,7 @@
 {
+  "schema_version": 1,
   "listen": "127.0.0.1:8765",
+  "allow_non_loopback": false,
   "official_base_url": "https://chatgpt.com/backend-api/codex",
   "cliproxy_base_url": "http://127.0.0.1:8317/v1",
   "cliproxy_api_key_env": "CLIPROXY_API_KEY",
@@ -15,10 +17,25 @@
       "id": "kimi-k3",
       "display_name": "Kimi K3",
       "description": "Kimi K3 via CLIProxyAPI",
+      "route": "cliproxy",
+      "upstream_model": "kimi-k3",
+      "wire_api": "responses",
       "context_window": 1048576,
       "input_modalities": ["text", "image"],
+      "output_modalities": ["text"],
       "reasoning_levels": ["none"],
-      "default_reasoning_level": "none"
+      "default_reasoning_level": "none",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "parallel_tools": false,
+        "web_search": false
+      },
+      "compatibility": {
+        "status": "verified",
+        "codex_cli": "0.153.2",
+        "cliproxyapi": "7.3.11"
+      }
     }
   ],
   "sidecar": {

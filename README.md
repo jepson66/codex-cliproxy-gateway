@@ -34,6 +34,10 @@ then uses the local CLIProxyAPI access key for that hop. The key is loaded from
 `~/.codex/codex-cliproxy-gateway/`. It is not the Kimi provider key. Secrets are
 never written to the gateway JSON config or request logs.
 
+Non-loopback listeners are rejected unless `allow_non_loopback` is explicitly
+enabled. Third-party model ids are allowlisted from the Gateway configuration;
+an unknown `cliproxy/*` id fails closed instead of being forwarded.
+
 Codex compresses some OpenAI-authenticated requests with zstd. The gateway
 keeps compressed official requests byte-for-byte intact and uses the local
 `zstd` command only to inspect routing; prefixed third-party requests are sent
@@ -61,6 +65,10 @@ printing it.
 
 Edit `~/.codex/codex-cliproxy-gateway.json` to add prefixed models. Model IDs in
 that file do not include `cliproxy/`; the catalog generator adds the prefix.
+Configuration schema version 1 requires each new model to declare its route,
+upstream model id, wire API, modalities, and capabilities explicitly. Legacy
+PoC configuration without `schema_version` is migrated in memory with
+behavior-preserving defaults; saving it writes the current schema.
 
 The gateway reads the current official models from
 `~/.codex/models_cache.json`, preserving the exact GPT entries that Codex
@@ -136,6 +144,18 @@ Use `doctor` before starting:
 ```sh
 ./codex-cliproxy-gateway doctor
 ```
+
+`doctor` authenticates against CLIProxyAPI's models endpoint without invoking a
+model. An optional end-to-end check makes one small, potentially billable model
+request and therefore must be requested explicitly:
+
+```sh
+./codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
+```
+
+Runtime health endpoints are split by purpose: `/livez` checks only the
+Gateway process, while `/readyz` verifies that the CLIProxyAPI key and models
+endpoint are usable. `/healthz` remains a compatibility alias for liveness.
 
 Restart Codex after catalog changes because Codex loads
 `model_catalog_json` at startup.
