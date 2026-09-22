@@ -13,6 +13,7 @@ import (
 
 	"codex-cliproxy-gateway/internal/catalog"
 	"codex-cliproxy-gateway/internal/config"
+	"github.com/pelletier/go-toml/v2"
 )
 
 const providerID = "codex-cliproxy-gateway"
@@ -38,11 +39,17 @@ func Apply(cfg config.Config) (State, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return State{}, fmt.Errorf("read Codex config: %w", err)
 	}
+	if err := validateTOML("existing Codex config", original); err != nil {
+		return State{}, err
+	}
 	if previous, stateErr := loadState(cfg); stateErr == nil {
 		if !matchesInstalledConfig(original, previous, cfg) {
 			return State{}, fmt.Errorf("Codex config changed after installation; refusing to replace it automatically (backup: %s). Run `catalog` to update only the generated model catalog, or reconcile config.toml manually before reinstalling", previous.BackupPath)
 		}
 		patched := PatchConfig(string(original), cfg)
+		if err := validateTOML("patched Codex config", []byte(patched)); err != nil {
+			return State{}, err
+		}
 		if err := writeFileAtomic(configPath, []byte(patched), 0o600); err != nil {
 			return State{}, fmt.Errorf("update Codex config: %w", err)
 		}
@@ -58,13 +65,16 @@ func Apply(cfg config.Config) (State, error) {
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return State{}, err
 	}
-	stamp := time.Now().UTC().Format("20060102T150405Z")
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	backupPath := filepath.Join(backupDir, "config.toml."+stamp+".bak")
 	if err := os.WriteFile(backupPath, original, 0o600); err != nil {
 		return State{}, fmt.Errorf("write backup: %w", err)
 	}
 
 	patched := PatchConfig(string(original), cfg)
+	if err := validateTOML("patched Codex config", []byte(patched)); err != nil {
+		return State{}, err
+	}
 	if err := os.MkdirAll(cfg.CodexHome, 0o700); err != nil {
 		return State{}, err
 	}
@@ -124,7 +134,10 @@ func Restore(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(state.ConfigPath, backup, 0o600); err != nil {
+	if err := validateTOML("Codex config backup", backup); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(state.ConfigPath, backup, 0o600); err != nil {
 		return err
 	}
 	return os.Remove(statePath(cfg))
@@ -141,9 +154,15 @@ func RepairLegacyProviders(cfg config.Config) (backupPath string, changed bool, 
 	if err != nil {
 		return "", false, fmt.Errorf("read Codex config: %w", err)
 	}
+	if err := validateTOML("existing Codex config", original); err != nil {
+		return "", false, err
+	}
 	patched, changed := patchLegacyProvidersOnly(string(original), cfg)
 	if !changed {
 		return "", false, nil
+	}
+	if err := validateTOML("patched Codex config", []byte(patched)); err != nil {
+		return "", false, err
 	}
 
 	backupDir := filepath.Join(cfg.CodexHome, "codex-cliproxy-gateway", "backups")
@@ -234,6 +253,17 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 	return os.Rename(tmpPath, path)
 }
 
+func validateTOML(label string, data []byte) error {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	var document map[string]any
+	if err := toml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("%s is invalid TOML: %w", label, err)
+	}
+	return nil
+}
+
 func PatchConfig(input string, cfg config.Config) string {
 	return patchConfig(input, cfg, true)
 }
@@ -259,7 +289,7 @@ func patchConfig(input string, cfg config.Config, rewriteLegacyProviders bool) s
 		if strings.HasPrefix(trimmed, "[") {
 			flushLegacyProvider()
 			seenTable = true
-			inTargetProvider = trimmed == "[model_providers."+providerID+"]"
+			inTargetProvider = isProviderTable(trimmed, providerID)
 			inLegacyProvider = rewriteLegacyProviders && isLegacyProviderTable(trimmed, cfg.LegacyProviderIDs)
 			legacyBaseURLSeen = false
 			if inTargetProvider {
@@ -312,11 +342,17 @@ func patchConfig(input string, cfg config.Config, rewriteLegacyProviders bool) s
 
 func isLegacyProviderTable(line string, providerIDs []string) bool {
 	for _, id := range providerIDs {
-		if line == "[model_providers."+id+"]" {
+		if isProviderTable(line, id) {
 			return true
 		}
 	}
 	return false
+}
+
+func isProviderTable(line, id string) bool {
+	return line == "[model_providers."+id+"]" ||
+		line == `[model_providers."`+id+`"]` ||
+		line == "[model_providers.'"+id+"']"
 }
 
 func collapseBlankLines(lines []string) []string {
@@ -371,7 +407,7 @@ func saveState(cfg config.Config, state State) error {
 	}
 	data, _ := json.MarshalIndent(state, "", "  ")
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func loadState(cfg config.Config) (State, error) {

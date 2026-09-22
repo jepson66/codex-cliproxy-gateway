@@ -24,3 +24,23 @@ func TestPlistEscapesPathsAndStartsServe(t *testing.T) {
 		}
 	}
 }
+
+func TestCLIProxyPlistUsesIndependentService(t *testing.T) {
+	paths := CLIProxyPaths{
+		Binary: "/tmp/cli&proxy",
+		Plist:  "/tmp/unused.plist",
+		LogDir: "/tmp/logs",
+	}
+	plist := CLIProxyPlist(paths, "/tmp/config<test>.yaml")
+	for _, expected := range []string{
+		"<string>com.codex-cliproxy-gateway.cliproxyapi</string>",
+		"<string>/tmp/cli&amp;proxy</string>",
+		"<string>-config</string>",
+		"<string>/tmp/config&lt;test&gt;.yaml</string>",
+		"cliproxyapi.err.log",
+	} {
+		if !strings.Contains(plist, expected) {
+			t.Fatalf("plist missing %q:\n%s", expected, plist)
+		}
+	}
+}

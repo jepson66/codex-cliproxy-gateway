@@ -12,8 +12,15 @@ import (
 )
 
 const Label = "com.codex-cliproxy-gateway"
+const CLIProxyLabel = "com.codex-cliproxy-gateway.cliproxyapi"
 
 type Paths struct {
+	Binary string
+	Plist  string
+	LogDir string
+}
+
+type CLIProxyPaths struct {
 	Binary string
 	Plist  string
 	LogDir string
@@ -27,6 +34,18 @@ func DefaultPaths() (Paths, error) {
 	return Paths{
 		Binary: filepath.Join(home, ".local", "bin", "codex-cliproxy-gateway"),
 		Plist:  filepath.Join(home, "Library", "LaunchAgents", Label+".plist"),
+		LogDir: filepath.Join(home, ".codex", "codex-cliproxy-gateway"),
+	}, nil
+}
+
+func DefaultCLIProxyPaths() (CLIProxyPaths, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return CLIProxyPaths{}, err
+	}
+	return CLIProxyPaths{
+		Binary: filepath.Join(home, ".local", "bin", "cli-proxy-api"),
+		Plist:  filepath.Join(home, "Library", "LaunchAgents", CLIProxyLabel+".plist"),
 		LogDir: filepath.Join(home, ".codex", "codex-cliproxy-gateway"),
 	}, nil
 }
@@ -78,6 +97,53 @@ func Uninstall() error {
 	return nil
 }
 
+func InstallCLIProxy(binaryPath, configPath string) (CLIProxyPaths, error) {
+	paths, err := DefaultCLIProxyPaths()
+	if err != nil {
+		return CLIProxyPaths{}, err
+	}
+	if binaryPath != "" {
+		paths.Binary = binaryPath
+	}
+	if info, err := os.Stat(paths.Binary); err != nil || info.IsDir() {
+		return CLIProxyPaths{}, fmt.Errorf("CLIProxyAPI binary is unavailable at %s", paths.Binary)
+	}
+	if info, err := os.Stat(configPath); err != nil || info.IsDir() {
+		return CLIProxyPaths{}, fmt.Errorf("CLIProxyAPI config is unavailable at %s", configPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.Plist), 0o700); err != nil {
+		return CLIProxyPaths{}, err
+	}
+	if err := os.MkdirAll(paths.LogDir, 0o700); err != nil {
+		return CLIProxyPaths{}, err
+	}
+	if err := os.WriteFile(paths.Plist, []byte(CLIProxyPlist(paths, configPath)), 0o600); err != nil {
+		return CLIProxyPaths{}, fmt.Errorf("write CLIProxyAPI LaunchAgent: %w", err)
+	}
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
+	if output, err := exec.Command("/bin/launchctl", "bootstrap", domain, paths.Plist).CombinedOutput(); err != nil {
+		return CLIProxyPaths{}, fmt.Errorf("load CLIProxyAPI LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
+	}
+	if output, err := exec.Command("/bin/launchctl", "kickstart", "-k", domain+"/"+CLIProxyLabel).CombinedOutput(); err != nil {
+		return CLIProxyPaths{}, fmt.Errorf("start CLIProxyAPI LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
+	}
+	return paths, nil
+}
+
+func UninstallCLIProxy() error {
+	paths, err := DefaultCLIProxyPaths()
+	if err != nil {
+		return err
+	}
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
+	if err := os.Remove(paths.Plist); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove CLIProxyAPI LaunchAgent: %w", err)
+	}
+	return nil
+}
+
 func Plist(paths Paths, configPath string) string {
 	values := map[string]string{
 		"label":  Label,
@@ -99,6 +165,38 @@ func Plist(paths Paths, configPath string) string {
     <string>%s</string>
     <string>serve</string>
     <string>--config</string>
+    <string>%s</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
+</dict>
+</plist>
+`, values["label"], values["binary"], values["config"], values["stdout"], values["stderr"])
+}
+
+func CLIProxyPlist(paths CLIProxyPaths, configPath string) string {
+	values := map[string]string{
+		"label":  CLIProxyLabel,
+		"binary": paths.Binary,
+		"config": configPath,
+		"stdout": filepath.Join(paths.LogDir, "cliproxyapi.out.log"),
+		"stderr": filepath.Join(paths.LogDir, "cliproxyapi.err.log"),
+	}
+	for key, value := range values {
+		values[key] = xmlEscape(value)
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>-config</string>
     <string>%s</string>
   </array>
   <key>RunAtLoad</key><true/>

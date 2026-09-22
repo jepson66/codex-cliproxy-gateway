@@ -129,7 +129,7 @@ func Load(path string) (Config, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
-	data, err := os.ReadFile(expandHome(path))
+	data, err := os.ReadFile(ExpandPath(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
 	}
@@ -199,12 +199,12 @@ func (c *Config) applyDefaults(legacySchema bool) {
 }
 
 func (c *Config) expandPaths() {
-	c.CodexHome = expandHome(c.CodexHome)
-	c.OfficialModelsCache = expandHome(c.OfficialModelsCache)
-	c.ModelCatalogPath = expandHome(c.ModelCatalogPath)
-	c.CLIProxyAPIKeyFile = expandHome(c.CLIProxyAPIKeyFile)
-	c.CLIProxyConfigPath = expandHome(c.CLIProxyConfigPath)
-	c.ZstdCommand = expandHome(c.ZstdCommand)
+	c.CodexHome = ExpandPath(c.CodexHome)
+	c.OfficialModelsCache = ExpandPath(c.OfficialModelsCache)
+	c.ModelCatalogPath = ExpandPath(c.ModelCatalogPath)
+	c.CLIProxyAPIKeyFile = ExpandPath(c.CLIProxyAPIKeyFile)
+	c.CLIProxyConfigPath = ExpandPath(c.CLIProxyConfigPath)
+	c.ZstdCommand = ExpandPath(c.ZstdCommand)
 }
 
 func (c Config) ResolveZstdCommand() (string, error) {
@@ -291,7 +291,7 @@ func (c Config) ImportCLIProxyAPIKey() error {
 	return errors.New("CLIProxyAPI config has no scalar api-keys entry")
 }
 
-func expandHome(path string) string {
+func ExpandPath(path string) string {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			if path == "~" {
@@ -399,7 +399,7 @@ func (c Config) Save(path string) error {
 	if path == "" {
 		path = DefaultPath()
 	}
-	path = expandHome(path)
+	path = ExpandPath(path)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

@@ -83,6 +83,35 @@ distinguish that identity from the Codex host.
 
 ## Install and run
 
+Preview every user-level file and service change before installation:
+
+```sh
+./codex-cliproxy-gateway plan --cliproxy-mode external
+```
+
+`external` mode never installs or manages CLIProxyAPI. After reviewing the
+plan, bootstrap the Gateway around an existing CLIProxyAPI installation:
+
+```sh
+./codex-cliproxy-gateway bootstrap --cliproxy-mode external
+```
+
+An experiment-gated `managed` mode installs the pinned CLIProxyAPI 7.3.11
+release from the upstream GitHub repository, verifies its SHA-256 before
+extraction, creates an independent LaunchAgent, and preserves any existing
+CLIProxyAPI config. It must be explicitly enabled until the clean-machine
+admission test is complete:
+
+```sh
+./codex-cliproxy-gateway plan --cliproxy-mode managed
+./codex-cliproxy-gateway bootstrap --cliproxy-mode managed --experimental-managed
+```
+
+On a new machine, managed mode creates a private loopback CLIProxyAPI skeleton
+config with a random local access key. It intentionally does not invent or
+collect provider credentials; add the Kimi/Claude/Gemini provider mapping to
+the private CLIProxyAPI config afterward, then run `doctor`.
+
 `install` backs up `~/.codex/config.toml`, generates the merged catalog, and
 sets one custom provider with `requires_openai_auth = true`:
 
@@ -100,6 +129,11 @@ present. It prints this scope, the original backup path, and maintenance
 commands after installation. If the file contains other post-install edits,
 the installer refuses to overwrite it; use `catalog` when only the generated
 model list needs updating.
+
+For automation, `bootstrap --yes` accepts the already printed plan. Without
+`--yes`, an interactive confirmation is required; non-interactive execution
+fails closed. Provider keys are never printed and credential files are excluded
+from this repository by `.gitignore`.
 
 Maintenance commands:
 

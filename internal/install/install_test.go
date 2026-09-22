@@ -187,6 +187,60 @@ func TestApplyAndRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestApplyValidatesComplexTOMLWithoutReformatting(t *testing.T) {
+	cfg := testConfig(t)
+	configPath := filepath.Join(cfg.CodexHome, "config.toml")
+	original := `# preserve this comment
+model = "gpt-test"
+features = ["one", "two"]
+
+[model_providers."codex-cliproxy-gateway"]
+name = "stale"
+base_url = "http://stale.invalid"
+
+[projects."/Volumes/OWC/path with spaces"]
+trust_level = "trusted"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, preserved := range []string{
+		"# preserve this comment",
+		`features = ["one", "two"]`,
+		`[projects."/Volumes/OWC/path with spaces"]`,
+	} {
+		if !strings.Contains(string(got), preserved) {
+			t.Fatalf("missing preserved TOML %q:\n%s", preserved, got)
+		}
+	}
+	if strings.Count(string(got), "codex-cliproxy-gateway]") != 1 {
+		t.Fatalf("target provider was duplicated:\n%s", got)
+	}
+}
+
+func TestApplyRejectsInvalidExistingTOML(t *testing.T) {
+	cfg := testConfig(t)
+	configPath := filepath.Join(cfg.CodexHome, "config.toml")
+	original := "model = [unterminated\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(cfg); err == nil || !strings.Contains(err.Error(), "invalid TOML") {
+		t.Fatalf("invalid TOML error = %v", err)
+	}
+	got, _ := os.ReadFile(configPath)
+	if string(got) != original {
+		t.Fatalf("invalid config was modified: %q", got)
+	}
+}
+
 func TestSummaryExplainsManagedChangesAndMaintenance(t *testing.T) {
 	cfg := config.Default()
 	state := State{BackupPath: "/tmp/config.toml.backup"}
