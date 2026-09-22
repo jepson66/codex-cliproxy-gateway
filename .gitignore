@@ -1,0 +1,18 @@
+/bin/
+/codex-cliproxy-gateway
+/.gocache/
+/.runtime/
+/docs/
+
+# Local credentials and machine-specific overrides must never be committed.
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*api-key*.txt
+*api key*.txt
+kimi api.txt
+/credentials/
+/secrets/
+*.local.json
