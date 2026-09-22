@@ -81,6 +81,30 @@ func TestBootstrapRequiresExplicitNonInteractiveConfirmation(t *testing.T) {
 	}
 }
 
+func TestStatusReportsCleanUserWithoutMutatingIt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "LocalAppData"))
+	configPath := filepath.Join(dir, "invalid-config.json")
+	if err := os.WriteFile(configPath, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(context.Background(), []string{"status", "--config", configPath}, Streams{Out: &stdout, Err: &stderr})
+	if exitCode != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"Service manager:", "Gateway:", "Managed CLIProxyAPI:", "state: not-installed"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("status missing %q:\n%s", expected, stdout.String())
+		}
+	}
+	if data, err := os.ReadFile(configPath); err != nil || string(data) != "not-json" {
+		t.Fatalf("status mutated config: %q, %v", data, err)
+	}
+}
+
 func TestConfirmHandlesInteractiveAnswers(t *testing.T) {
 	for _, test := range []struct {
 		answer  string

@@ -62,6 +62,14 @@ func Run(ctx context.Context, args []string, streams Streams) int {
 		fmt.Fprintln(streams.Out, Version)
 		return 0
 	}
+	if command == "status" {
+		report, err := service.Inspect()
+		if err != nil {
+			return fail(streams.Err, err)
+		}
+		fmt.Fprintln(streams.Out, report.String())
+		return 0
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -160,7 +168,7 @@ func Run(ctx context.Context, args []string, streams Streams) int {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "init", "plan", "bootstrap", "catalog", "install", "repair-legacy-providers", "import-cliproxy-key", "uninstall", "serve", "service-install", "service-uninstall", "doctor", "version", "--version", "-version":
+	case "init", "plan", "bootstrap", "catalog", "install", "repair-legacy-providers", "import-cliproxy-key", "uninstall", "serve", "service-install", "service-uninstall", "status", "doctor", "version", "--version", "-version":
 		return true
 	default:
 		return false
@@ -273,7 +281,7 @@ func resolvedConfigPath(path string) string {
 }
 
 func usage(output io.Writer) {
-	fmt.Fprintln(output, "usage: codex-cliproxy-gateway <init|plan|bootstrap|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|doctor|version> [options]")
+	fmt.Fprintln(output, "usage: codex-cliproxy-gateway <init|plan|bootstrap|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|status|doctor|version> [options]")
 }
 
 func fail(output io.Writer, err error) int {

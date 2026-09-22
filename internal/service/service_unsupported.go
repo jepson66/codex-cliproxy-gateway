@@ -18,3 +18,6 @@ func installCLIProxyService(Paths, string) error { return unsupportedPlatform() 
 func uninstallCLIProxyService(Paths) error       { return unsupportedPlatform() }
 func stopGatewayForUpdate(Paths) error           { return unsupportedPlatform() }
 func stopCLIProxyForUpdate(Paths) error          { return unsupportedPlatform() }
+func queryService(Paths, string) (bool, string, error) {
+	return false, "unsupported", unsupportedPlatform()
+}

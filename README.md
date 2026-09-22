@@ -146,6 +146,9 @@ Maintenance commands:
 # After rebuilding or updating the Gateway binary:
 ./codex-cliproxy-gateway service-install
 
+# Inspect both native user services without changing them:
+./codex-cliproxy-gateway status
+
 # Restore the original pre-install Codex config (only when the safety check
 # confirms no unrelated post-install edits would be lost):
 ./codex-cliproxy-gateway uninstall

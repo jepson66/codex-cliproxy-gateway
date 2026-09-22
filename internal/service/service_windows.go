@@ -115,6 +115,23 @@ func stopTaskIfInstalled(definition, name string) error {
 	return nil
 }
 
+func queryService(_ Paths, label string) (bool, string, error) {
+	taskName := gatewayTaskName
+	if label == CLIProxyLabel {
+		taskName = cliProxyTaskName
+	}
+	script := fmt.Sprintf("(Get-ScheduledTask -TaskName '%s' -ErrorAction Stop).State.ToString()", strings.ReplaceAll(taskName, "'", "''"))
+	output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if err != nil {
+		return false, "unknown", fmt.Errorf("query Task Scheduler task %s: %w: %s", taskName, err, bytes.TrimSpace(output))
+	}
+	state := strings.ToLower(strings.TrimSpace(string(output)))
+	if state == "" {
+		state = "unknown"
+	}
+	return state == "running", state, nil
+}
+
 func deleteTask(name string) error {
 	_ = exec.Command("schtasks.exe", "/End", "/TN", name).Run()
 	output, err := exec.Command("schtasks.exe", "/Delete", "/TN", name, "/F").CombinedOutput()

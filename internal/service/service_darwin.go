@@ -81,6 +81,26 @@ func stopCLIProxyForUpdate(paths Paths) error {
 	return nil
 }
 
+func queryService(_ Paths, label string) (bool, string, error) {
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	output, err := exec.Command("/bin/launchctl", "print", domain+"/"+label).CombinedOutput()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return false, "not-loaded", nil
+		}
+		return false, "unknown", err
+	}
+	state := "loaded"
+	for _, line := range bytes.Split(output, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("state = ")) {
+			state = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("state = "))))
+			break
+		}
+	}
+	return state == "running", state, nil
+}
+
 func Plist(paths Paths, configPath string) string {
 	values := map[string]string{
 		"label":  Label,

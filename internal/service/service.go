@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const Label = "com.codex-cliproxy-gateway"
@@ -19,6 +20,22 @@ type Paths struct {
 }
 
 type CLIProxyPaths = Paths
+
+type ComponentStatus struct {
+	Name          string
+	Binary        string
+	Definition    string
+	BinaryPresent bool
+	Installed     bool
+	Running       bool
+	State         string
+}
+
+type Report struct {
+	Manager  string
+	Gateway  ComponentStatus
+	CLIProxy ComponentStatus
+}
 
 func DefaultPaths() (Paths, error) {
 	home, err := os.UserHomeDir()
@@ -40,6 +57,99 @@ func DefaultCLIProxyPaths() (CLIProxyPaths, error) {
 // build. It is intended for installation plans and user-facing status text.
 func ManagerName() string {
 	return managerName
+}
+
+func Inspect() (Report, error) {
+	gatewayPaths, err := DefaultPaths()
+	if err != nil {
+		return Report{}, err
+	}
+	cliProxyPaths, err := DefaultCLIProxyPaths()
+	if err != nil {
+		return Report{}, err
+	}
+	gateway, err := inspectComponent("Gateway", Label, gatewayPaths, queryService)
+	if err != nil {
+		return Report{}, err
+	}
+	cliProxy, err := inspectComponent("Managed CLIProxyAPI", CLIProxyLabel, cliProxyPaths, queryService)
+	if err != nil {
+		return Report{}, err
+	}
+	return Report{Manager: ManagerName(), Gateway: gateway, CLIProxy: cliProxy}, nil
+}
+
+func (r Report) String() string {
+	var output strings.Builder
+	fmt.Fprintf(&output, "Service manager: %s\n", r.Manager)
+	writeComponentStatus(&output, r.Gateway)
+	writeComponentStatus(&output, r.CLIProxy)
+	return strings.TrimSuffix(output.String(), "\n")
+}
+
+func writeComponentStatus(output *strings.Builder, status ComponentStatus) {
+	fmt.Fprintf(output, "%s:\n", status.Name)
+	fmt.Fprintf(output, "  binary: %s (%s)\n", status.Binary, presentAbsent(status.BinaryPresent))
+	fmt.Fprintf(output, "  definition: %s (%s)\n", status.Definition, presentAbsent(status.Installed))
+	fmt.Fprintf(output, "  state: %s\n", status.State)
+	fmt.Fprintf(output, "  running: %s\n", yesNo(status.Running))
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func presentAbsent(value bool) string {
+	if value {
+		return "present"
+	}
+	return "absent"
+}
+
+type serviceQuery func(Paths, string) (bool, string, error)
+
+func inspectComponent(name, label string, paths Paths, query serviceQuery) (ComponentStatus, error) {
+	status := ComponentStatus{
+		Name:       name,
+		Binary:     paths.Binary,
+		Definition: paths.Definition,
+		State:      "not-installed",
+	}
+	binaryPresent, err := regularFileExists(paths.Binary)
+	if err != nil {
+		return ComponentStatus{}, fmt.Errorf("inspect %s binary: %w", name, err)
+	}
+	status.BinaryPresent = binaryPresent
+	installed, err := regularFileExists(paths.Definition)
+	if err != nil {
+		return ComponentStatus{}, fmt.Errorf("inspect %s definition: %w", name, err)
+	}
+	status.Installed = installed
+	if !installed {
+		return status, nil
+	}
+	status.Running, status.State, err = query(paths, label)
+	if err != nil {
+		return ComponentStatus{}, fmt.Errorf("inspect %s service: %w", name, err)
+	}
+	return status, nil
+}
+
+func regularFileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("%s is a directory", path)
+	}
+	return true, nil
 }
 
 func Install(configPath string) (Paths, error) {

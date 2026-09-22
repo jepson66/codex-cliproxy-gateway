@@ -113,6 +113,19 @@ func stopSystemdUnitIfInstalled(definition, name string) error {
 	return systemctl("stop", name)
 }
 
+func queryService(_ Paths, label string) (bool, string, error) {
+	name := label + ".service"
+	output, err := exec.Command("systemctl", "--user", "is-active", name).CombinedOutput()
+	state := strings.TrimSpace(string(output))
+	if err == nil {
+		return state == "active", state, nil
+	}
+	if _, ok := err.(*exec.ExitError); ok && state != "" {
+		return false, state, nil
+	}
+	return false, "unknown", err
+}
+
 func systemctl(args ...string) error {
 	commandArgs := append([]string{"--user"}, args...)
 	output, err := exec.Command("systemctl", commandArgs...).CombinedOutput()
