@@ -20,7 +20,8 @@ ChatGPT OAuth         CLIProxyAPI
 This is a proof of concept. Codex CLI 0.153.2 on macOS has been verified with
 both an official GPT model and `cliproxy/kimi-k3`, including Codex's zstd
 request compression. It has routing tests, reversible Codex configuration
-installation, a merged model catalog, and a per-user LaunchAgent. Desktop uses
+installation, a merged model catalog, and native per-user background services
+for macOS, Linux, and Windows. Desktop uses
 the same user-level Codex configuration, but each Desktop release still needs
 a real UI acceptance check before production use.
 
@@ -98,9 +99,9 @@ plan, bootstrap the Gateway around an existing CLIProxyAPI installation:
 
 An experiment-gated `managed` mode installs the pinned CLIProxyAPI 7.3.11
 release from the upstream GitHub repository, verifies its SHA-256 before
-extraction, creates an independent LaunchAgent, and preserves any existing
-CLIProxyAPI config. It must be explicitly enabled until the clean-machine
-admission test is complete:
+extraction, creates an independent native user service, and preserves any
+existing CLIProxyAPI config. It must be explicitly enabled until the
+clean-machine admission test is complete:
 
 ```sh
 ./codex-cliproxy-gateway plan --cliproxy-mode managed
@@ -161,10 +162,20 @@ This creates a fresh backup and changes only the `base_url` of provider IDs in
 plugins, environment variables, model selection, and all other Codex settings
 are preserved.
 
-On macOS, `service-install` copies the current binary to `~/.local/bin`, writes
-a per-user LaunchAgent, and starts it. For foreground debugging, use `serve`
-instead. `service-uninstall` removes only the LaunchAgent; it preserves the
-binary and configuration.
+`service-install` copies the current binary to a per-user location, writes a
+native user service definition, and starts it without requiring administrator
+or root access:
+
+- macOS: `~/.local/bin` plus a LaunchAgent.
+- Linux: `~/.local/bin` plus a systemd user service.
+- Windows: `%LOCALAPPDATA%\codex-cliproxy-gateway` plus a per-user Task
+  Scheduler login task.
+
+For foreground debugging, use `serve` instead. `service-uninstall` removes only
+the native service definition; it preserves the binary and configuration.
+Cross-builds cover arm64 and amd64 on all three operating systems. Runtime
+service installation remains unverified until it passes on a clean machine or
+VM for that operating system.
 
 The installer is reversible while the installed Codex config has not been
 edited afterward:

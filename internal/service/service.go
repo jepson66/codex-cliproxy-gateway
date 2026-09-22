@@ -1,41 +1,31 @@
 package service
 
 import (
-	"bytes"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 )
 
 const Label = "com.codex-cliproxy-gateway"
 const CLIProxyLabel = "com.codex-cliproxy-gateway.cliproxyapi"
 
+// Paths contains the platform-specific locations used to install one service.
+// Definition is a launchd plist, systemd unit, or Task Scheduler XML file.
 type Paths struct {
-	Binary string
-	Plist  string
-	LogDir string
+	Binary     string
+	Definition string
+	LogDir     string
 }
 
-type CLIProxyPaths struct {
-	Binary string
-	Plist  string
-	LogDir string
-}
+type CLIProxyPaths = Paths
 
 func DefaultPaths() (Paths, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Paths{}, err
 	}
-	return Paths{
-		Binary: filepath.Join(home, ".local", "bin", "codex-cliproxy-gateway"),
-		Plist:  filepath.Join(home, "Library", "LaunchAgents", Label+".plist"),
-		LogDir: filepath.Join(home, ".codex", "codex-cliproxy-gateway"),
-	}, nil
+	return defaultGatewayPaths(home)
 }
 
 func DefaultCLIProxyPaths() (CLIProxyPaths, error) {
@@ -43,11 +33,13 @@ func DefaultCLIProxyPaths() (CLIProxyPaths, error) {
 	if err != nil {
 		return CLIProxyPaths{}, err
 	}
-	return CLIProxyPaths{
-		Binary: filepath.Join(home, ".local", "bin", "cli-proxy-api"),
-		Plist:  filepath.Join(home, "Library", "LaunchAgents", CLIProxyLabel+".plist"),
-		LogDir: filepath.Join(home, ".codex", "codex-cliproxy-gateway"),
-	}, nil
+	return defaultCLIProxyPaths(home)
+}
+
+// ManagerName identifies the native per-user service manager used by this
+// build. It is intended for installation plans and user-facing status text.
+func ManagerName() string {
+	return managerName
 }
 
 func Install(configPath string) (Paths, error) {
@@ -59,27 +51,14 @@ func Install(configPath string) (Paths, error) {
 	if err != nil {
 		return Paths{}, fmt.Errorf("find current executable: %w", err)
 	}
-	if err := copyExecutable(source, paths.Binary); err != nil {
+	if err := copyExecutable(source, paths.Binary, func() error { return stopGatewayForUpdate(paths) }); err != nil {
 		return Paths{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.Plist), 0o700); err != nil {
+	if err := preparePaths(paths); err != nil {
 		return Paths{}, err
 	}
-	if err := os.MkdirAll(paths.LogDir, 0o700); err != nil {
+	if err := installGatewayService(paths, configPath); err != nil {
 		return Paths{}, err
-	}
-	plist := Plist(paths, configPath)
-	if err := os.WriteFile(paths.Plist, []byte(plist), 0o600); err != nil {
-		return Paths{}, fmt.Errorf("write LaunchAgent: %w", err)
-	}
-
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
-	if output, err := exec.Command("/bin/launchctl", "bootstrap", domain, paths.Plist).CombinedOutput(); err != nil {
-		return Paths{}, fmt.Errorf("load LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
-	}
-	if output, err := exec.Command("/bin/launchctl", "kickstart", "-k", domain+"/"+Label).CombinedOutput(); err != nil {
-		return Paths{}, fmt.Errorf("start LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
 	}
 	return paths, nil
 }
@@ -89,12 +68,7 @@ func Uninstall() error {
 	if err != nil {
 		return err
 	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
-	if err := os.Remove(paths.Plist); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove LaunchAgent: %w", err)
-	}
-	return nil
+	return uninstallGatewayService(paths)
 }
 
 func InstallCLIProxy(binaryPath, configPath string) (CLIProxyPaths, error) {
@@ -111,22 +85,11 @@ func InstallCLIProxy(binaryPath, configPath string) (CLIProxyPaths, error) {
 	if info, err := os.Stat(configPath); err != nil || info.IsDir() {
 		return CLIProxyPaths{}, fmt.Errorf("CLIProxyAPI config is unavailable at %s", configPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.Plist), 0o700); err != nil {
+	if err := preparePaths(paths); err != nil {
 		return CLIProxyPaths{}, err
 	}
-	if err := os.MkdirAll(paths.LogDir, 0o700); err != nil {
+	if err := installCLIProxyService(paths, configPath); err != nil {
 		return CLIProxyPaths{}, err
-	}
-	if err := os.WriteFile(paths.Plist, []byte(CLIProxyPlist(paths, configPath)), 0o600); err != nil {
-		return CLIProxyPaths{}, fmt.Errorf("write CLIProxyAPI LaunchAgent: %w", err)
-	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
-	if output, err := exec.Command("/bin/launchctl", "bootstrap", domain, paths.Plist).CombinedOutput(); err != nil {
-		return CLIProxyPaths{}, fmt.Errorf("load CLIProxyAPI LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
-	}
-	if output, err := exec.Command("/bin/launchctl", "kickstart", "-k", domain+"/"+CLIProxyLabel).CombinedOutput(); err != nil {
-		return CLIProxyPaths{}, fmt.Errorf("start CLIProxyAPI LaunchAgent: %w: %s", err, bytes.TrimSpace(output))
 	}
 	return paths, nil
 }
@@ -136,85 +99,41 @@ func UninstallCLIProxy() error {
 	if err != nil {
 		return err
 	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("/bin/launchctl", "bootout", domain, paths.Plist).Run()
-	if err := os.Remove(paths.Plist); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove CLIProxyAPI LaunchAgent: %w", err)
+	return uninstallCLIProxyService(paths)
+}
+
+// StopCLIProxyForUpdate stops an existing managed CLIProxyAPI process just
+// before its verified replacement is written. It does not remove its service
+// definition and is a no-op on a clean installation.
+func StopCLIProxyForUpdate() error {
+	paths, err := DefaultCLIProxyPaths()
+	if err != nil {
+		return err
+	}
+	return stopCLIProxyForUpdate(paths)
+}
+
+func preparePaths(paths Paths) error {
+	if err := os.MkdirAll(filepath.Dir(paths.Definition), 0o700); err != nil {
+		return fmt.Errorf("create service definition directory: %w", err)
+	}
+	if err := os.MkdirAll(paths.LogDir, 0o700); err != nil {
+		return fmt.Errorf("create service log directory: %w", err)
 	}
 	return nil
 }
 
-func Plist(paths Paths, configPath string) string {
-	values := map[string]string{
-		"label":  Label,
-		"binary": paths.Binary,
-		"config": configPath,
-		"stdout": filepath.Join(paths.LogDir, "gateway.out.log"),
-		"stderr": filepath.Join(paths.LogDir, "gateway.err.log"),
-	}
-	for key, value := range values {
-		values[key] = xmlEscape(value)
-	}
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>%s</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-    <string>serve</string>
-    <string>--config</string>
-    <string>%s</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>%s</string>
-  <key>StandardErrorPath</key><string>%s</string>
-</dict>
-</plist>
-`, values["label"], values["binary"], values["config"], values["stdout"], values["stderr"])
-}
-
-func CLIProxyPlist(paths CLIProxyPaths, configPath string) string {
-	values := map[string]string{
-		"label":  CLIProxyLabel,
-		"binary": paths.Binary,
-		"config": configPath,
-		"stdout": filepath.Join(paths.LogDir, "cliproxyapi.out.log"),
-		"stderr": filepath.Join(paths.LogDir, "cliproxyapi.err.log"),
-	}
-	for key, value := range values {
-		values[key] = xmlEscape(value)
-	}
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>%s</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-    <string>-config</string>
-    <string>%s</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>%s</string>
-  <key>StandardErrorPath</key><string>%s</string>
-</dict>
-</plist>
-`, values["label"], values["binary"], values["config"], values["stdout"], values["stderr"])
-}
-
-func copyExecutable(source, destination string) error {
+func copyExecutable(source, destination string, beforeWrite func() error) error {
 	input, err := os.Open(source)
 	if err != nil {
 		return fmt.Errorf("open executable: %w", err)
 	}
 	defer input.Close()
+	if sourceInfo, sourceErr := input.Stat(); sourceErr == nil {
+		if destinationInfo, destinationErr := os.Stat(destination); destinationErr == nil && os.SameFile(sourceInfo, destinationInfo) {
+			return nil
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
 	}
@@ -232,8 +151,17 @@ func copyExecutable(source, destination string) error {
 		_ = temp.Close()
 		return err
 	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
+	}
+	if beforeWrite != nil {
+		if err := beforeWrite(); err != nil {
+			return fmt.Errorf("prepare executable update: %w", err)
+		}
 	}
 	if err := os.Rename(tempPath, destination); err != nil {
 		return fmt.Errorf("install executable: %w", err)
@@ -241,8 +169,16 @@ func copyExecutable(source, destination string) error {
 	return nil
 }
 
-func xmlEscape(value string) string {
-	var out bytes.Buffer
-	_ = xml.EscapeText(&out, []byte(value))
-	return out.String()
+func writeDefinition(path, kind, content string) error {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write %s definition: %w", kind, err)
+	}
+	return nil
+}
+
+func removeDefinition(path, kind string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s definition: %w", kind, err)
+	}
+	return nil
 }

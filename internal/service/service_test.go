@@ -1,3 +1,5 @@
+//go:build darwin
+
 package service
 
 import (
@@ -7,9 +9,9 @@ import (
 
 func TestPlistEscapesPathsAndStartsServe(t *testing.T) {
 	paths := Paths{
-		Binary: "/tmp/a&b/gateway",
-		Plist:  "/tmp/unused.plist",
-		LogDir: "/tmp/logs",
+		Binary:     "/tmp/a&b/gateway",
+		Definition: "/tmp/unused.plist",
+		LogDir:     "/tmp/logs",
 	}
 	plist := Plist(paths, "/tmp/config<test>.json")
 	for _, expected := range []string{
@@ -27,9 +29,9 @@ func TestPlistEscapesPathsAndStartsServe(t *testing.T) {
 
 func TestCLIProxyPlistUsesIndependentService(t *testing.T) {
 	paths := CLIProxyPaths{
-		Binary: "/tmp/cli&proxy",
-		Plist:  "/tmp/unused.plist",
-		LogDir: "/tmp/logs",
+		Binary:     "/tmp/cli&proxy",
+		Definition: "/tmp/unused.plist",
+		LogDir:     "/tmp/logs",
 	}
 	plist := CLIProxyPlist(paths, "/tmp/config<test>.yaml")
 	for _, expected := range []string{

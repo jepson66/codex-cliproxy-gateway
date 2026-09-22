@@ -44,7 +44,7 @@ func BuildPlan(cfg config.Config, configPath string, mode Mode) (Plan, error) {
 		{Operation: "create/update", Target: cfg.ModelCatalogPath, Details: "merged official and allowlisted third-party model catalog"},
 		{Operation: "modify selected fields", Target: filepath.Join(cfg.CodexHome, "config.toml"), Details: "preserves unrelated settings; creates a private backup before the first change"},
 		{Operation: "install/update", Target: gatewayPaths.Binary, Details: "Gateway executable"},
-		{Operation: "install/update", Target: gatewayPaths.Plist, Details: "Gateway per-user LaunchAgent"},
+		{Operation: "install/update", Target: gatewayPaths.Definition, Details: "Gateway " + service.ManagerName()},
 	}
 	if mode == External {
 		actions = append(actions, Action{Operation: "preserve", Target: cfg.CLIProxyConfigPath, Details: "CLIProxyAPI installation, config, and service remain user-managed"})
@@ -60,7 +60,7 @@ func BuildPlan(cfg config.Config, configPath string, mode Mode) (Plan, error) {
 		actions = append(actions,
 			Action{Operation: "download/verify/install", Target: cliproxyPaths.Binary, Details: fmt.Sprintf("CLIProxyAPI %s from %s (SHA-256 pinned)", asset.Version, asset.URL)},
 			Action{Operation: createOrPreserve(cfg.CLIProxyConfigPath), Target: cfg.CLIProxyConfigPath, Details: "private loopback CLIProxyAPI config; existing provider credentials are never overwritten"},
-			Action{Operation: "create/update", Target: cliproxyPaths.Plist, Details: "independent CLIProxyAPI per-user LaunchAgent"},
+			Action{Operation: "create/update", Target: cliproxyPaths.Definition, Details: "independent CLIProxyAPI " + service.ManagerName()},
 		)
 	}
 	return Plan{Mode: mode, Actions: actions}, nil

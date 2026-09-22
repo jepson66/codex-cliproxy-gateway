@@ -2,6 +2,7 @@ package dependency
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -39,14 +41,19 @@ type State struct {
 }
 
 type Installer struct {
-	Client *http.Client
+	Client      *http.Client
+	BeforeWrite func() error
+	MaxAttempts int
+	RetryDelay  time.Duration
 }
 
 var pinnedChecksums = map[string]string{
-	"darwin/aarch64": "5671e4c7cf96919f35bd2bd76c68c6d57448219de655f5ca2db186b9534b7754",
-	"darwin/amd64":   "dc4a75ef7256667959e2eb7e5c37bec5178f08f36657becf73fa65ef8a1cc118",
-	"linux/aarch64":  "8c5a2bd09aca61b2d7753bee25609e0483c9047dee383b08fa5c3527aa9a75ae",
-	"linux/amd64":    "4fc3e20aa6ab896316ac70633c8ed08b10d4219d1c3075d5b145b422c6bfab64",
+	"darwin/aarch64":  "5671e4c7cf96919f35bd2bd76c68c6d57448219de655f5ca2db186b9534b7754",
+	"darwin/amd64":    "dc4a75ef7256667959e2eb7e5c37bec5178f08f36657becf73fa65ef8a1cc118",
+	"linux/aarch64":   "8c5a2bd09aca61b2d7753bee25609e0483c9047dee383b08fa5c3527aa9a75ae",
+	"linux/amd64":     "4fc3e20aa6ab896316ac70633c8ed08b10d4219d1c3075d5b145b422c6bfab64",
+	"windows/aarch64": "dee6f38286d03b4c267d6baa823484681ff2aeeda14d73c55f979f42871f0afc",
+	"windows/amd64":   "510301e28ef5459d359bf2b508c014894b6601d1ba26e2e7800cc0964621c615",
 }
 
 func ResolveAsset(version, goos, goarch string) (Asset, error) {
@@ -64,7 +71,11 @@ func ResolveAsset(version, goos, goarch string) (Asset, error) {
 	if !ok {
 		return Asset{}, fmt.Errorf("CLIProxyAPI managed install is unsupported on %s/%s", goos, goarch)
 	}
-	name := fmt.Sprintf("CLIProxyAPI_%s_%s_%s.tar.gz", version, goos, arch)
+	extension := ".tar.gz"
+	if goos == "windows" {
+		extension = ".zip"
+	}
+	name := fmt.Sprintf("CLIProxyAPI_%s_%s_%s%s", version, goos, arch, extension)
 	return Asset{
 		Version: version,
 		Name:    name,
@@ -82,6 +93,13 @@ func DefaultBinaryPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if runtime.GOOS == "windows" {
+		root := os.Getenv("LOCALAPPDATA")
+		if root == "" {
+			root = filepath.Join(home, "AppData", "Local")
+		}
+		return filepath.Join(root, "codex-cliproxy-gateway", "bin", "cli-proxy-api.exe"), nil
+	}
 	return filepath.Join(home, ".local", "bin", "cli-proxy-api"), nil
 }
 
@@ -93,33 +111,23 @@ func (i Installer) Install(ctx context.Context, asset Asset, destination, stateP
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
+	archive, err := i.download(ctx, client, asset.URL)
 	if err != nil {
 		return State{}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return State{}, fmt.Errorf("download CLIProxyAPI: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return State{}, fmt.Errorf("download CLIProxyAPI: HTTP %d", resp.StatusCode)
-	}
-	archive, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
-	if err != nil {
-		return State{}, fmt.Errorf("read CLIProxyAPI archive: %w", err)
-	}
-	if len(archive) > maxArchiveSize {
-		return State{}, fmt.Errorf("CLIProxyAPI archive exceeds %d bytes", maxArchiveSize)
 	}
 	sum := sha256.Sum256(archive)
 	actual := hex.EncodeToString(sum[:])
 	if !strings.EqualFold(actual, asset.SHA256) {
 		return State{}, fmt.Errorf("CLIProxyAPI checksum mismatch: expected %s, got %s", asset.SHA256, actual)
 	}
-	binary, err := extractBinary(archive)
+	binary, err := extractBinary(asset.Name, archive)
 	if err != nil {
 		return State{}, err
+	}
+	if i.BeforeWrite != nil {
+		if err := i.BeforeWrite(); err != nil {
+			return State{}, fmt.Errorf("prepare CLIProxyAPI update: %w", err)
+		}
 	}
 	if err := writeExecutableAtomic(destination, binary); err != nil {
 		return State{}, err
@@ -139,7 +147,84 @@ func (i Installer) Install(ctx context.Context, asset Asset, destination, stateP
 	return state, nil
 }
 
-func extractBinary(archive []byte) ([]byte, error) {
+func (i Installer) download(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	attempts := i.MaxAttempts
+	if attempts == 0 {
+		attempts = 3
+	}
+	if attempts < 1 {
+		return nil, fmt.Errorf("CLIProxyAPI download attempts must be positive")
+	}
+	delay := i.RetryDelay
+	if delay == 0 {
+		delay = 250 * time.Millisecond
+	}
+	var lastErr error
+	usedAttempts := 0
+	for attempt := 1; attempt <= attempts; attempt++ {
+		usedAttempts = attempt
+		archive, retry, err := downloadOnce(ctx, client, url)
+		if err == nil {
+			return archive, nil
+		}
+		lastErr = err
+		if !retry || attempt == attempts {
+			break
+		}
+		if err := waitForRetry(ctx, delay*time.Duration(attempt)); err != nil {
+			return nil, fmt.Errorf("download CLIProxyAPI: %w", err)
+		}
+	}
+	return nil, fmt.Errorf("download CLIProxyAPI after %d attempt(s): %w", usedAttempts, lastErr)
+}
+
+func downloadOnce(ctx context.Context, client *http.Client, url string) ([]byte, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, true, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return nil, retry, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	archive, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
+	if err != nil {
+		return nil, true, fmt.Errorf("read archive: %w", err)
+	}
+	if len(archive) > maxArchiveSize {
+		return nil, false, fmt.Errorf("archive exceeds %d bytes", maxArchiveSize)
+	}
+	return archive, false, nil
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func extractBinary(assetName string, archive []byte) ([]byte, error) {
+	switch {
+	case strings.HasSuffix(strings.ToLower(assetName), ".tar.gz"):
+		return extractTarGzipBinary(archive)
+	case strings.HasSuffix(strings.ToLower(assetName), ".zip"):
+		return extractZipBinary(archive)
+	default:
+		return nil, fmt.Errorf("unsupported CLIProxyAPI archive format %q", assetName)
+	}
+}
+
+func extractTarGzipBinary(archive []byte) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return nil, fmt.Errorf("open CLIProxyAPI archive: %w", err)
@@ -157,7 +242,10 @@ func extractBinary(archive []byte) ([]byte, error) {
 		if header.Typeflag != tar.TypeReg {
 			continue
 		}
-		base := strings.ToLower(filepath.Base(header.Name))
+		if err := validateArchivePath(header.Name); err != nil {
+			return nil, err
+		}
+		base := strings.ToLower(path.Base(strings.ReplaceAll(header.Name, `\`, "/")))
 		if base != "cli-proxy-api" && base != "cliproxyapi" {
 			continue
 		}
@@ -174,6 +262,65 @@ func extractBinary(archive []byte) ([]byte, error) {
 		return data, nil
 	}
 	return nil, fmt.Errorf("CLIProxyAPI archive contains no cli-proxy-api binary")
+}
+
+func extractZipBinary(archive []byte) ([]byte, error) {
+	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		return nil, fmt.Errorf("open CLIProxyAPI archive: %w", err)
+	}
+	var binary []byte
+	for _, file := range reader.File {
+		if err := validateArchivePath(file.Name); err != nil {
+			return nil, err
+		}
+		base := strings.ToLower(path.Base(strings.ReplaceAll(file.Name, `\`, "/")))
+		if base != "cli-proxy-api.exe" && base != "cliproxyapi.exe" {
+			continue
+		}
+		if !file.FileInfo().Mode().IsRegular() {
+			return nil, fmt.Errorf("CLIProxyAPI archive binary is not a regular file")
+		}
+		if binary != nil {
+			return nil, fmt.Errorf("CLIProxyAPI archive contains multiple matching binaries")
+		}
+		if file.UncompressedSize64 < 1 || file.UncompressedSize64 > maxArchiveSize {
+			return nil, fmt.Errorf("invalid CLIProxyAPI binary size %d", file.UncompressedSize64)
+		}
+		entry, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open CLIProxyAPI binary: %w", err)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(entry, maxArchiveSize+1))
+		closeErr := entry.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read CLIProxyAPI binary: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close CLIProxyAPI binary: %w", closeErr)
+		}
+		if uint64(len(data)) != file.UncompressedSize64 {
+			return nil, fmt.Errorf("truncated CLIProxyAPI binary")
+		}
+		binary = data
+	}
+	if binary == nil {
+		return nil, fmt.Errorf("CLIProxyAPI archive contains no cli-proxy-api.exe binary")
+	}
+	return binary, nil
+}
+
+func validateArchivePath(name string) error {
+	normalized := strings.ReplaceAll(name, `\`, "/")
+	clean := path.Clean(normalized)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return fmt.Errorf("unsafe CLIProxyAPI archive path %q", name)
+	}
+	first := strings.SplitN(clean, "/", 2)[0]
+	if strings.Contains(first, ":") {
+		return fmt.Errorf("unsafe CLIProxyAPI archive path %q", name)
+	}
+	return nil
 }
 
 func writeExecutableAtomic(path string, data []byte) error {

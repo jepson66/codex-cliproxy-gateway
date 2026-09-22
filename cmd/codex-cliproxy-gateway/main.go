@@ -136,9 +136,9 @@ func main() {
 			}
 		}
 		if lifecycle.Mode(*cliproxyMode) == lifecycle.Managed {
-			fmt.Println("stopped and removed the Gateway and managed CLIProxyAPI LaunchAgents; configs and binaries were preserved")
+			fmt.Printf("stopped and removed the Gateway and managed CLIProxyAPI %s definitions; configs and binaries were preserved\n", service.ManagerName())
 		} else {
-			fmt.Println("stopped and removed the Gateway LaunchAgent; config and binary were preserved")
+			fmt.Printf("stopped and removed the Gateway %s definition; config and binary were preserved\n", service.ManagerName())
 		}
 	case "doctor":
 		doctor(cfg, *e2e, *diagnosticModel)
@@ -194,7 +194,7 @@ func bootstrap(cfg config.Config, configPath string, mode lifecycle.Mode, clipro
 			return err
 		}
 		statePath := filepath.Join(cfg.CodexHome, "codex-cliproxy-gateway", "dependencies", "cliproxyapi.json")
-		if _, err := (dependency.Installer{}).Install(context.Background(), asset, binaryPath, statePath); err != nil {
+		if _, err := (dependency.Installer{BeforeWrite: service.StopCLIProxyForUpdate}).Install(context.Background(), asset, binaryPath, statePath); err != nil {
 			return err
 		}
 		if _, err := lifecycle.EnsureManagedCLIProxyConfig(cfg); err != nil {
