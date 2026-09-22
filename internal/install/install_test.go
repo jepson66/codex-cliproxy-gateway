@@ -1,6 +1,7 @@
 package install
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -248,7 +249,7 @@ func TestSummaryExplainsManagedChangesAndMaintenance(t *testing.T) {
 	for _, expected := range []string{
 		"full config.toml replacement: no",
 		`model_provider = "codex-cliproxy-gateway"`,
-		`model_catalog_json = "` + cfg.ModelCatalogPath + `"`,
+		fmt.Sprintf("model_catalog_json = %q", cfg.ModelCatalogPath),
 		"[model_providers.codex-cliproxy-gateway]",
 		"openai-http",
 		"codex-cliproxy-gateway catalog",
