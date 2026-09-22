@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,7 +125,7 @@ func TestImportCLIProxyAPIKey(t *testing.T) {
 		t.Fatalf("imported key = %q", data)
 	}
 	info, _ := os.Stat(keyPath)
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("key file mode = %o", info.Mode().Perm())
 	}
 }

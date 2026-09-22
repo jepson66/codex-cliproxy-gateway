@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -130,10 +131,10 @@ func TestInstallVerifiesChecksumAndWritesPrivateState(t *testing.T) {
 	if err != nil || string(data) != "test-binary" {
 		t.Fatalf("binary = %q, %v", data, err)
 	}
-	if info, _ := os.Stat(destination); info.Mode().Perm() != 0o755 {
+	if info, _ := os.Stat(destination); runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Fatalf("binary mode = %o", info.Mode().Perm())
 	}
-	if info, _ := os.Stat(statePath); info.Mode().Perm() != 0o600 {
+	if info, _ := os.Stat(statePath); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("state mode = %o", info.Mode().Perm())
 	}
 

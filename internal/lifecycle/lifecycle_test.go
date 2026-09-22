@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestEnsureManagedCLIProxyConfigCreatesPrivateFilesAndPreservesExisting(t *t
 		t.Fatal("Gateway key and CLIProxyAPI access key differ")
 	}
 	for _, path := range []string{cfg.CLIProxyConfigPath, cfg.CLIProxyAPIKeyFile} {
-		if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		if info, _ := os.Stat(path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Fatalf("%s mode = %o", path, info.Mode().Perm())
 		}
 	}
