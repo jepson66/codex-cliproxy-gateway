@@ -11,7 +11,7 @@ import (
 	"codex-cliproxy-gateway/internal/config"
 )
 
-func TestGeneratePreservesOfficialModelsAndAddsKimi(t *testing.T) {
+func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "models_cache.json")
 	official := map[string]any{
@@ -41,29 +41,37 @@ func TestGeneratePreservesOfficialModelsAndAddsKimi(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Models) != 3 {
+	if len(doc.Models) != 4 {
 		t.Fatalf("model count = %d", len(doc.Models))
 	}
 	if doc.Models[0]["custom"] != "keep-me" || doc.Models[1]["slug"] != "gpt-two" {
 		t.Fatalf("official entries changed: %#v", doc.Models[:2])
 	}
+	wantLevels := []map[string]string{
+		{"effort": "low", "description": "Reasoning effort: low"},
+		{"effort": "high", "description": "Reasoning effort: high"},
+		{"effort": "max", "description": "Reasoning effort: max"},
+	}
+	for index, slug := range []string{"cliproxy/kimi-k3-256k", "cliproxy/kimi-k3"} {
+		kimi := doc.Models[2+index]
+		if kimi["slug"] != slug {
+			t.Fatalf("Kimi slug = %#v, want %q", kimi["slug"], slug)
+		}
+		levels, ok := kimi["supported_reasoning_levels"].([]map[string]string)
+		if !ok || !reflect.DeepEqual(levels, wantLevels) {
+			t.Fatalf("Kimi reasoning levels = %#v", kimi["supported_reasoning_levels"])
+		}
+		if kimi["default_reasoning_level"] != "high" {
+			t.Fatalf("Kimi default reasoning = %#v", kimi["default_reasoning_level"])
+		}
+		if _, ok := kimi["custom"]; ok {
+			t.Fatalf("Kimi inherited an unknown official field: %#v", kimi["custom"])
+		}
+		if _, ok := kimi["multi_agent_version"]; ok {
+			t.Fatalf("Kimi inherited an undeclared capability: %#v", kimi["multi_agent_version"])
+		}
+	}
 	kimi := doc.Models[2]
-	if kimi["slug"] != "cliproxy/kimi-k3" {
-		t.Fatalf("Kimi slug = %#v", kimi["slug"])
-	}
-	levels, ok := kimi["supported_reasoning_levels"].([]map[string]string)
-	if !ok || !reflect.DeepEqual(levels, []map[string]string{{"effort": "none", "description": "The upstream model manages reasoning automatically"}}) {
-		t.Fatalf("Kimi reasoning levels = %#v", kimi["supported_reasoning_levels"])
-	}
-	if kimi["default_reasoning_level"] != "none" {
-		t.Fatalf("Kimi default reasoning = %#v", kimi["default_reasoning_level"])
-	}
-	if _, ok := kimi["custom"]; ok {
-		t.Fatalf("Kimi inherited an unknown official field: %#v", kimi["custom"])
-	}
-	if _, ok := kimi["multi_agent_version"]; ok {
-		t.Fatalf("Kimi inherited an undeclared capability: %#v", kimi["multi_agent_version"])
-	}
 	messages, ok := kimi["model_messages"].(map[string]any)
 	if !ok {
 		t.Fatalf("Kimi instructions template = %#v", kimi["model_messages"])

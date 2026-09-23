@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,10 +31,18 @@ type ModelCompatibility struct {
 	CLIProxyAPI string `json:"cliproxyapi,omitempty"`
 }
 
+type ProviderSpec struct {
+	ID            string `json:"id"`
+	DisplayName   string `json:"display_name"`
+	SetupURL      string `json:"setup_url"`
+	RequiredModel string `json:"required_model"`
+}
+
 type ModelSpec struct {
 	ID                    string             `json:"id"`
 	DisplayName           string             `json:"display_name"`
 	Description           string             `json:"description,omitempty"`
+	ProviderID            string             `json:"provider_id,omitempty"`
 	Route                 string             `json:"route,omitempty"`
 	UpstreamModel         string             `json:"upstream_model,omitempty"`
 	WireAPI               string             `json:"wire_api,omitempty"`
@@ -54,22 +63,23 @@ type Sidecar struct {
 }
 
 type Config struct {
-	SchemaVersion       int         `json:"schema_version"`
-	Listen              string      `json:"listen"`
-	AllowNonLoopback    bool        `json:"allow_non_loopback,omitempty"`
-	OfficialBaseURL     string      `json:"official_base_url"`
-	CLIProxyBaseURL     string      `json:"cliproxy_base_url"`
-	CLIProxyAPIKeyEnv   string      `json:"cliproxy_api_key_env"`
-	CLIProxyAPIKeyFile  string      `json:"cliproxy_api_key_file"`
-	CLIProxyConfigPath  string      `json:"cliproxy_config_path"`
-	ZstdCommand         string      `json:"zstd_command,omitempty"`
-	ModelPrefix         string      `json:"model_prefix"`
-	CodexHome           string      `json:"codex_home"`
-	OfficialModelsCache string      `json:"official_models_cache"`
-	ModelCatalogPath    string      `json:"model_catalog_path"`
-	LegacyProviderIDs   []string    `json:"legacy_provider_ids,omitempty"`
-	Models              []ModelSpec `json:"models"`
-	Sidecar             Sidecar     `json:"sidecar"`
+	SchemaVersion       int            `json:"schema_version"`
+	Listen              string         `json:"listen"`
+	AllowNonLoopback    bool           `json:"allow_non_loopback,omitempty"`
+	OfficialBaseURL     string         `json:"official_base_url"`
+	CLIProxyBaseURL     string         `json:"cliproxy_base_url"`
+	CLIProxyAPIKeyEnv   string         `json:"cliproxy_api_key_env"`
+	CLIProxyAPIKeyFile  string         `json:"cliproxy_api_key_file"`
+	CLIProxyConfigPath  string         `json:"cliproxy_config_path"`
+	ZstdCommand         string         `json:"zstd_command,omitempty"`
+	ModelPrefix         string         `json:"model_prefix"`
+	CodexHome           string         `json:"codex_home"`
+	OfficialModelsCache string         `json:"official_models_cache"`
+	ModelCatalogPath    string         `json:"model_catalog_path"`
+	LegacyProviderIDs   []string       `json:"legacy_provider_ids,omitempty"`
+	Providers           []ProviderSpec `json:"providers,omitempty"`
+	Models              []ModelSpec    `json:"models"`
+	Sidecar             Sidecar        `json:"sidecar"`
 }
 
 func Default() Config {
@@ -89,26 +99,56 @@ func Default() Config {
 		OfficialModelsCache: filepath.Join(codexHome, "models_cache.json"),
 		ModelCatalogPath:    filepath.Join(codexHome, "model-catalogs", "codex-cliproxy-gateway.json"),
 		LegacyProviderIDs:   []string{"openai-http"},
+		Providers: []ProviderSpec{
+			{
+				ID:            "kimi-code",
+				DisplayName:   "Kimi Code",
+				SetupURL:      "https://www.kimi.com/code/console",
+				RequiredModel: "kimi-k3-256k",
+			},
+		},
 		Models: []ModelSpec{
+			{
+				ID:                    "kimi-k3-256k",
+				DisplayName:           "Kimi K3 256K",
+				Description:           "Kimi K3 256K via Kimi Code and CLIProxyAPI",
+				ProviderID:            "kimi-code",
+				Route:                 "cliproxy",
+				UpstreamModel:         "kimi-k3-256k",
+				WireAPI:               "responses",
+				ContextWindow:         262_144,
+				InputModalities:       []string{"text", "image"},
+				OutputModalities:      []string{"text"},
+				ReasoningLevels:       []string{"low", "high", "max"},
+				DefaultReasoningLevel: "high",
+				Capabilities: ModelCapabilities{
+					Streaming: true,
+					Tools:     true,
+				},
+				Compatibility: ModelCompatibility{
+					Status:      "experimental",
+					CLIProxyAPI: "7.3.11",
+				},
+			},
 			{
 				ID:                    "kimi-k3",
 				DisplayName:           "Kimi K3",
-				Description:           "Kimi K3 via CLIProxyAPI",
+				Description:           "Kimi K3 via Kimi Code and CLIProxyAPI; 1M context requires an eligible membership",
+				ProviderID:            "kimi-code",
 				Route:                 "cliproxy",
 				UpstreamModel:         "kimi-k3",
 				WireAPI:               "responses",
 				ContextWindow:         1_048_576,
 				InputModalities:       []string{"text", "image"},
 				OutputModalities:      []string{"text"},
-				ReasoningLevels:       []string{"none"},
-				DefaultReasoningLevel: "none",
+				ReasoningLevels:       []string{"low", "high", "max"},
+				DefaultReasoningLevel: "high",
 				Capabilities: ModelCapabilities{
 					Streaming: true,
 					Tools:     true,
 				},
 				Compatibility: ModelCompatibility{
-					Status:      "verified",
-					CodexCLI:    "0.153.2",
+					Status:      "experimental",
 					CLIProxyAPI: "7.3.11",
 				},
 			},
@@ -138,6 +178,7 @@ func Load(path string) (Config, error) {
 	}
 	var header struct {
 		SchemaVersion *int            `json:"schema_version"`
+		Providers     json.RawMessage `json:"providers"`
 		Models        json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(data, &header); err != nil {
@@ -149,6 +190,9 @@ func Load(path string) (Config, error) {
 	// fields into a different legacy model.
 	if header.Models != nil {
 		cfg.Models = nil
+	}
+	if header.Providers != nil {
+		cfg.Providers = nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -329,6 +373,23 @@ func (c Config) Validate() error {
 	if !strings.HasSuffix(c.ModelPrefix, "/") {
 		return errors.New("model_prefix must end with /")
 	}
+	seenProviders := make(map[string]struct{}, len(c.Providers))
+	for i, provider := range c.Providers {
+		if strings.TrimSpace(provider.ID) == "" {
+			return fmt.Errorf("providers[%d].id is required", i)
+		}
+		if _, exists := seenProviders[provider.ID]; exists {
+			return fmt.Errorf("providers[%d].id %q is duplicated", i, provider.ID)
+		}
+		seenProviders[provider.ID] = struct{}{}
+		if strings.TrimSpace(provider.DisplayName) == "" || strings.TrimSpace(provider.RequiredModel) == "" {
+			return fmt.Errorf("providers[%d].display_name and required_model are required", i)
+		}
+		setupURL, errURL := url.Parse(provider.SetupURL)
+		if errURL != nil || (setupURL.Scheme != "https" && setupURL.Scheme != "http") || setupURL.Host == "" {
+			return fmt.Errorf("providers[%d].setup_url must be an absolute HTTP(S) URL", i)
+		}
+	}
 	seenModels := make(map[string]struct{}, len(c.Models))
 	for i, model := range c.Models {
 		if strings.TrimSpace(model.ID) == "" {
@@ -341,6 +402,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("models[%d].id %q is duplicated", i, model.ID)
 		}
 		seenModels[model.ID] = struct{}{}
+		if model.ProviderID != "" {
+			if _, exists := seenProviders[model.ProviderID]; !exists {
+				return fmt.Errorf("models[%d].provider_id %q is not configured", i, model.ProviderID)
+			}
+		}
 		if model.Route != "cliproxy" {
 			return fmt.Errorf("models[%d].route %q is unsupported", i, model.Route)
 		}
@@ -384,6 +450,15 @@ func (c Config) Validate() error {
 		return errors.New("sidecar.command is required when sidecar.enabled is true")
 	}
 	return nil
+}
+
+func (c Config) Provider(id string) (ProviderSpec, bool) {
+	for _, provider := range c.Providers {
+		if provider.ID == id {
+			return provider, true
+		}
+	}
+	return ProviderSpec{}, false
 }
 
 func contains(values []string, expected string) bool {

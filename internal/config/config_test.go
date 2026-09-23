@@ -3,10 +3,46 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestDefaultKimiCodeModels(t *testing.T) {
+	cfg := Default()
+	if len(cfg.Providers) != 1 || cfg.Providers[0].ID != "kimi-code" || cfg.Providers[0].SetupURL != "https://www.kimi.com/code/console" {
+		t.Fatalf("default providers = %#v", cfg.Providers)
+	}
+	want := map[string]struct {
+		upstream string
+		context  int64
+	}{
+		"kimi-k3-256k": {upstream: "kimi-k3-256k", context: 262_144},
+		"kimi-k3":      {upstream: "kimi-k3", context: 1_048_576},
+	}
+	if len(cfg.Models) != len(want) {
+		t.Fatalf("default model count = %d, want %d", len(cfg.Models), len(want))
+	}
+	for _, model := range cfg.Models {
+		expected, ok := want[model.ID]
+		if !ok {
+			t.Fatalf("unexpected default model %q", model.ID)
+		}
+		if model.UpstreamModel != expected.upstream || model.ContextWindow != expected.context {
+			t.Fatalf("model %q routing/context = %q/%d", model.ID, model.UpstreamModel, model.ContextWindow)
+		}
+		if model.ProviderID != "kimi-code" {
+			t.Fatalf("model %q provider = %q", model.ID, model.ProviderID)
+		}
+		if !reflect.DeepEqual(model.ReasoningLevels, []string{"low", "high", "max"}) {
+			t.Fatalf("model %q reasoning levels = %#v", model.ID, model.ReasoningLevels)
+		}
+		if model.DefaultReasoningLevel != "high" {
+			t.Fatalf("model %q default reasoning = %q", model.ID, model.DefaultReasoningLevel)
+		}
+	}
+}
 
 func TestLoadMigratesLegacyConfigInMemory(t *testing.T) {
 	dir := t.TempDir()

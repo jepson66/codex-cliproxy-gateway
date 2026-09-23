@@ -18,6 +18,7 @@ import (
 	"codex-cliproxy-gateway/internal/install"
 	"codex-cliproxy-gateway/internal/lifecycle"
 	"codex-cliproxy-gateway/internal/lifecycle/dependency"
+	"codex-cliproxy-gateway/internal/providerauth"
 	"codex-cliproxy-gateway/internal/service"
 )
 
@@ -51,10 +52,16 @@ func Run(ctx context.Context, args []string, streams Streams) int {
 	cliproxyVersion := flags.String("cliproxy-version", dependency.DefaultCLIProxyAPIVersion, "pinned CLIProxyAPI version for managed mode")
 	yes := flags.Bool("yes", false, "confirm the displayed bootstrap plan non-interactively")
 	experimentalManaged := flags.Bool("experimental-managed", false, "enable the gated managed CLIProxyAPI installer")
+	noBrowser := flags.Bool("no-browser", false, "do not open the provider setup page (login only)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 {
+	providerCommand := command == "login" || command == "auth-status"
+	if providerCommand && flags.NArg() != 1 {
+		fmt.Fprintf(streams.Err, "error: %s requires exactly one provider id\n", command)
+		return 2
+	}
+	if !providerCommand && flags.NArg() != 0 {
 		fmt.Fprintf(streams.Err, "error: unexpected positional arguments: %s\n", strings.Join(flags.Args(), " "))
 		return 2
 	}
@@ -162,17 +169,60 @@ func Run(ctx context.Context, args []string, streams Streams) int {
 		if !doctor(ctx, streams.Out, cfg, *e2e, *diagnosticModel) {
 			return 1
 		}
+	case "login":
+		if err := runProviderCommand(ctx, streams, cfg, flags.Arg(0), true, *noBrowser, providerCommandDependencies{}); err != nil {
+			return fail(streams.Err, err)
+		}
+	case "auth-status":
+		if err := runProviderCommand(ctx, streams, cfg, flags.Arg(0), false, true, providerCommandDependencies{}); err != nil {
+			return fail(streams.Err, err)
+		}
 	}
 	return 0
 }
 
 func knownCommand(command string) bool {
 	switch command {
-	case "init", "plan", "bootstrap", "catalog", "install", "repair-legacy-providers", "import-cliproxy-key", "uninstall", "serve", "service-install", "service-uninstall", "status", "doctor", "version", "--version", "-version":
+	case "init", "plan", "bootstrap", "catalog", "install", "repair-legacy-providers", "import-cliproxy-key", "uninstall", "serve", "service-install", "service-uninstall", "status", "doctor", "login", "auth-status", "version", "--version", "-version":
 		return true
 	default:
 		return false
 	}
+}
+
+type providerCommandDependencies struct {
+	checker providerauth.Checker
+	openURL func(string) error
+}
+
+func runProviderCommand(ctx context.Context, streams Streams, cfg config.Config, providerID string, login, noBrowser bool, deps providerCommandDependencies) error {
+	status, err := deps.checker.Check(ctx, cfg, providerID, "")
+	if err != nil {
+		return err
+	}
+	if status.Configured {
+		fmt.Fprintf(streams.Out, "%s is configured in CLIProxyAPI. Credential validity is confirmed when the first model request reaches the provider.\n", status.Provider.DisplayName)
+		return nil
+	}
+	if !login {
+		return fmt.Errorf("%s", providerauth.LoginMessage(status.Provider, cfg.CLIProxyConfigPath, false))
+	}
+	fmt.Fprintf(streams.Out, "%s is not configured.\n", status.Provider.DisplayName)
+	fmt.Fprintf(streams.Out, "Setup page: %s\n", status.Provider.SetupURL)
+	fmt.Fprintf(streams.Out, "CLIProxyAPI config: %s\n", cfg.CLIProxyConfigPath)
+	fmt.Fprintf(streams.Out, "Create the provider credential, add the %s provider block documented in the README, then run:\n", status.Provider.ID)
+	fmt.Fprintf(streams.Out, "  codex-cliproxy-gateway auth-status %s\n", status.Provider.ID)
+	if noBrowser {
+		return nil
+	}
+	openURL := deps.openURL
+	if openURL == nil {
+		openURL = providerauth.OpenSetupURL
+	}
+	if err := openURL(status.Provider.SetupURL); err != nil {
+		fmt.Fprintf(streams.Err, "warning: %v; open %s manually\n", err, status.Provider.SetupURL)
+	}
+	return nil
 }
 
 func doctor(parent context.Context, output io.Writer, cfg config.Config, e2e bool, model string) bool {
@@ -281,7 +331,7 @@ func resolvedConfigPath(path string) string {
 }
 
 func usage(output io.Writer) {
-	fmt.Fprintln(output, "usage: codex-cliproxy-gateway <init|plan|bootstrap|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|status|doctor|version> [options]")
+	fmt.Fprintln(output, "usage: codex-cliproxy-gateway <init|plan|bootstrap|import-cliproxy-key|catalog|install|repair-legacy-providers|uninstall|serve|service-install|service-uninstall|status|doctor|login|auth-status|version> [options]")
 }
 
 func fail(output io.Writer, err error) int {

@@ -21,6 +21,7 @@ import (
 
 	"codex-cliproxy-gateway/internal/catalog"
 	"codex-cliproxy-gateway/internal/config"
+	"codex-cliproxy-gateway/internal/providerauth"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -38,6 +39,8 @@ type Server struct {
 	sidecar      *exec.Cmd
 	sidecarMutex sync.Mutex
 }
+
+type providerContextKey struct{}
 
 func New(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
@@ -208,6 +211,21 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "CLIProxyAPI key is not configured; run import-cliproxy-key", http.StatusServiceUnavailable)
 			return
 		}
+		spec := s.modelSpecs[model]
+		if spec.ProviderID != "" {
+			checker := providerauth.Checker{Client: &http.Client{Transport: s.cliproxy.Transport, Timeout: 3 * time.Second}}
+			status, checkErr := checker.Check(r.Context(), s.cfg, spec.ProviderID, spec.UpstreamModel)
+			if checkErr != nil {
+				s.logger.Warn("provider status check failed", "provider", spec.ProviderID, "error", checkErr)
+				writeAPIError(w, http.StatusBadGateway, "provider_status_unavailable", "Unable to check third-party provider login because CLIProxyAPI is unavailable or misconfigured.")
+				return
+			}
+			if !status.Configured {
+				writeProviderAuthError(w, status.Provider, s.cfg.CLIProxyConfigPath, false)
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), providerContextKey{}, status.Provider))
+		}
 		r.Body = io.NopCloser(bytes.NewReader(rewritten))
 		r.ContentLength = int64(len(rewritten))
 		r.Header.Del("Content-Encoding")
@@ -341,9 +359,60 @@ func (s *Server) newReverseProxy(target *url.URL, thirdParty bool) *httputil.Rev
 			s.logger.Error("upstream request failed", "error", err)
 			http.Error(w, "gateway upstream request failed", http.StatusBadGateway)
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if !thirdParty || resp.StatusCode != http.StatusUnauthorized {
+				return nil
+			}
+			if resp.Request == nil {
+				return nil
+			}
+			provider, ok := resp.Request.Context().Value(providerContextKey{}).(config.ProviderSpec)
+			if !ok {
+				return nil
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			_ = resp.Body.Close()
+			payload := apiErrorPayload(providerauth.ErrorCode(provider.ID, "credentials_rejected"), providerauth.LoginMessage(provider, s.cfg.CLIProxyConfigPath, true))
+			resp.Body = io.NopCloser(bytes.NewReader(payload))
+			resp.StatusCode = http.StatusBadRequest
+			resp.Status = "400 Bad Request"
+			resp.ContentLength = int64(len(payload))
+			resp.Header.Set("Content-Type", "application/json")
+			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+			return nil
+		},
 		FlushInterval: -1,
 	}
 	return proxy
+}
+
+func writeProviderAuthError(w http.ResponseWriter, provider config.ProviderSpec, configPath string, rejected bool) {
+	code := "provider_auth_required"
+	if rejected {
+		code = providerauth.ErrorCode(provider.ID, "credentials_rejected")
+	}
+	// Codex treats 401 as a ChatGPT credential refresh signal and retries it.
+	// A provider setup prerequisite is instead a non-retryable request error;
+	// the stable machine-readable code preserves the authentication meaning.
+	writeAPIError(w, http.StatusBadRequest, code, providerauth.LoginMessage(provider, configPath, rejected))
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(apiErrorPayload(code, message))
+}
+
+func apiErrorPayload(code, message string) []byte {
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "provider_auth_error",
+			"code":    code,
+			"param":   nil,
+		},
+	})
+	return payload
 }
 
 func trimAPIPrefix(path string) string {

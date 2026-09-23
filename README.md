@@ -24,8 +24,8 @@ codex-cliproxy-gateway (127.0.0.1:8765)
 ## Status
 
 - Proof of concept; managed CLIProxyAPI mode is explicitly experimental.
-- Kimi currently uses a manually entered API key. Kimi OAuth/subscription is
-  not included.
+- Kimi Code uses a manually entered subscription API key. Kimi OAuth is not
+  included.
 - CI and release builds cover macOS, Linux, and Windows on amd64 and arm64.
 - New providers need their own streaming, tool-call, image, context, and
   reasoning tests.
@@ -33,7 +33,8 @@ codex-cliproxy-gateway (127.0.0.1:8765)
 ## Install a prebuilt release
 
 Prerequisites: install Codex, sign in with ChatGPT, run one official model once,
-create a Kimi API key, and fully exit Codex.
+create a Kimi Code key at [Kimi Code Console](https://www.kimi.com/code/console),
+and fully exit Codex.
 
 The Gateway is written in Go, but release archives contain a compiled,
 standalone executable. The installer does not check, install, upgrade, or
@@ -69,26 +70,61 @@ After installation, edit the local CLIProxyAPI file yourself:
 - macOS/Linux: `~/.cli-proxy-api/config.yaml`
 - Windows: `%USERPROFILE%\.cli-proxy-api\config.yaml`
 
-Add an OpenAI-compatible provider and replace the placeholder with your own key:
+Add this OpenAI-compatible provider and replace the placeholder with your own
+Kimi Code key. This key uses Kimi Code membership quota; it is not a Moonshot
+Open Platform pay-as-you-go key.
 
 ```yaml
 openai-compatibility:
-  - name: "kimi"
-    base-url: "https://api.moonshot.cn/v1"
+  - name: "kimi-code"
+    base-url: "https://api.kimi.com/coding/v1"
     api-key-entries:
-      - api-key: "<YOUR_KIMI_API_KEY>"
+      - api-key: "<KIMI_CODE_KEY>"
     models:
-      - name: "kimi-k3"
+      - name: "k3-256k"
+        alias: "kimi-k3-256k"
+        max-context-length: 262144
+        input-modalities: [text, image]
+        output-modalities: [text]
+        thinking:
+          levels: [low, high, max]
+      - name: "k3"
         alias: "kimi-k3"
         max-context-length: 1048576
         input-modalities: [text, image]
         output-modalities: [text]
         thinking:
-          levels: ["none"]
+          levels: [low, high, max]
 ```
 
 Never commit this file or paste a real key into an issue. The Kimi provider key
 and the local CLIProxyAPI access key are different secrets.
+
+The existing Moonshot Open Platform configuration remains supported; do not
+replace it unless you intend to switch billing sources. Avoid enabling two
+providers with the same `kimi-k3` aliases at once.
+
+Kimi models stay visible in the Codex picker even before credentials are
+configured. On the first request, the Gateway checks CLIProxyAPI without
+reading the provider key. If Kimi Code is missing or rejects the key, Codex CLI
+and Desktop show an actionable authentication error with this command and the
+setup URL:
+
+```sh
+codex-cliproxy-gateway login kimi-code
+```
+
+The command opens the Kimi Code Console and prints the local configuration
+path. You still add the key to `config.yaml` yourself; the Gateway does not
+capture or copy it. To check whether CLIProxyAPI has loaded the provider:
+
+```sh
+codex-cliproxy-gateway auth-status kimi-code
+```
+
+Use `login --no-browser kimi-code` on a remote or headless machine. Codex does
+not notify custom providers when a model is merely selected, so the login hint
+appears when the first prompt is sent, not when the picker item is clicked.
 
 ## Select a model
 
@@ -102,15 +138,17 @@ codex-cliproxy-gateway doctor
 Optional end-to-end check (may incur a Kimi charge):
 
 ```sh
-codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
+codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3-256k
 ```
 
 **Codex Desktop:** fully quit and reopen the app, start a new chat, then use the
 model and reasoning control beneath the composer to choose
-`cliproxy/kimi-k3`. `Ctrl+Shift+M` opens the model picker.
+`cliproxy/kimi-k3-256k`. `Ctrl+Shift+M` opens the model picker.
 
 **Codex CLI:** restart Codex, enter `/model`, and choose
-`cliproxy/kimi-k3`. Official GPT models remain in the same picker.
+`cliproxy/kimi-k3-256k`. Official GPT models remain in the same picker. The
+`cliproxy/kimi-k3` entry advertises 1M context and requires an eligible Kimi
+membership; use the 256K entry by default.
 
 See [OpenAI's model selection documentation](https://learn.chatgpt.com/docs/models#choose-a-model)
 for the current Desktop control.
@@ -128,6 +166,7 @@ bypassed the Gateway or used stale configuration; verify
 | `bootstrap` | Apply a reviewed installation plan. |
 | `catalog` | Regenerate the merged model catalog. |
 | `status` / `doctor` | Check service and provider readiness. |
+| `login` / `auth-status` | Open provider setup or check whether CLIProxyAPI loaded it. |
 | `serve` | Run the Gateway in the foreground. |
 | `uninstall` | Restore the recorded Codex configuration backup safely. |
 

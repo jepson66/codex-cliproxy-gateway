@@ -3,11 +3,16 @@ package app
 import (
 	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"codex-cliproxy-gateway/internal/config"
+	"codex-cliproxy-gateway/internal/providerauth"
 )
 
 func TestRunUsageAndParseExitCodes(t *testing.T) {
@@ -129,3 +134,53 @@ func TestConfirmHandlesInteractiveAnswers(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderLoginGuidanceAndStatus(t *testing.T) {
+	cfg := config.Default()
+	cfg.CLIProxyBaseURL = "http://cliproxy.test/v1"
+	cfg.CLIProxyConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	cfg.CLIProxyAPIKeyEnv = "TEST_APP_PROVIDER_KEY"
+	t.Setenv("TEST_APP_PROVIDER_KEY", "local-key")
+
+	modelsBody := `{"data":[{"id":"other-model"}]}`
+	checker := providerauth.Checker{Client: &http.Client{Transport: appRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(modelsBody))}, nil
+	})}}
+	var stdout, stderr bytes.Buffer
+	opened := ""
+	deps := providerCommandDependencies{
+		checker: checker,
+		openURL: func(url string) error {
+			opened = url
+			return nil
+		},
+	}
+	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", true, false, deps); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Kimi Code is not configured", "https://www.kimi.com/code/console", cfg.CLIProxyConfigPath, "auth-status kimi-code"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("login output missing %q: %s", expected, stdout.String())
+		}
+	}
+	if opened != "https://www.kimi.com/code/console" {
+		t.Fatalf("opened URL = %q", opened)
+	}
+
+	stdout.Reset()
+	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", false, true, deps); err == nil || !strings.Contains(err.Error(), "login kimi-code") {
+		t.Fatalf("auth status error = %v", err)
+	}
+
+	modelsBody = `{"data":[{"id":"kimi-k3-256k"},{"id":"kimi-k3"}]}`
+	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", false, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "is configured in CLIProxyAPI") {
+		t.Fatalf("configured output = %s", stdout.String())
+	}
+}
+
+type appRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f appRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
