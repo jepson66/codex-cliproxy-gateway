@@ -24,7 +24,7 @@ jobs:
           set -eu
           tar -tzf dist/codex-cliproxy-gateway_linux_amd64.tar.gz
           unzip -l dist/codex-cliproxy-gateway_windows_amd64.zip
-          sha256sum --check dist/checksums.txt
+          (cd dist && sha256sum --check checksums.txt)
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
