@@ -84,7 +84,8 @@ try {
     Write-Host "  & `"$InstalledGateway`" doctor"
     Write-Host "For the optional billable Kimi check:"
     Write-Host "  & `"$InstalledGateway`" doctor --e2e --model cliproxy/kimi-k3"
-    Write-Host "Then fully restart Codex and select cliproxy/kimi-k3 from /model."
+    Write-Host "Desktop: fully restart Codex, then choose cliproxy/kimi-k3 from the model control beneath the composer."
+    Write-Host "CLI: restart Codex, enter /model, then choose cliproxy/kimi-k3."
 }
 finally {
     if (Test-Path -LiteralPath $TemporaryRoot) {

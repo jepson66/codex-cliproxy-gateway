@@ -5,13 +5,15 @@
 [![CI](https://github.com/jepson66/codex-cliproxy-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/jepson66/codex-cliproxy-gateway/actions/workflows/ci.yml)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#当前状态)
 
-一个实验性的本地网关：在 Codex 的同一个 `/model` 选择器中保留官方 GPT，
-并把 CLIProxyAPI 提供的模型加入同一列表。官方请求继续使用 ChatGPT OAuth；
-带 `cliproxy/*` 命名空间的请求转发到本机 CLIProxyAPI。
+一个实验性的本地网关：在 Codex 的同一个模型目录中保留官方 GPT，并加入
+CLIProxyAPI 提供的模型。Codex Desktop 使用输入区下方的模型控件，Codex CLI
+使用 `/model`。官方请求继续使用 ChatGPT OAuth；带 `cliproxy/*` 命名空间的
+请求转发到本机 CLIProxyAPI。
 
 ```text
-Codex CLI / Desktop
-        │ /model
+Codex Desktop / CLI
+        │ Desktop：输入区下方的模型控件
+        │ CLI：/model
         ▼
 codex-cliproxy-gateway（127.0.0.1:8765）
         ├── 官方模型 ───────► ChatGPT Codex（OAuth）
@@ -85,7 +87,7 @@ openai-compatibility:
 不要提交此配置文件或在 Issue 中粘贴真实 Key。Kimi 提供商密钥与本地
 CLIProxyAPI 访问密钥是两个不同的秘密。
 
-## 使用 `/model`
+## 选择模型
 
 先检查链路：
 
@@ -100,8 +102,15 @@ codex-cliproxy-gateway doctor
 codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
 ```
 
-完全退出 Codex，启动新会话，打开 `/model`，选择 `cliproxy/kimi-k3`。
+**Codex Desktop：** 完全退出并重新打开应用，新建会话，然后点击输入区下方的
+模型与推理控件，选择 `cliproxy/kimi-k3`。也可以按 `Ctrl+Shift+M` 打开模型
+选择器。
+
+**Codex CLI：** 重新启动 Codex，输入 `/model`，选择 `cliproxy/kimi-k3`。
 官方 GPT 模型仍在同一个选择器中。
+
+Desktop 当前入口可参考
+[OpenAI 模型选择文档](https://learn.chatgpt.com/docs/models#choose-a-model)。
 
 如果模型没有出现，先运行一次官方模型，再执行 `catalog` 并重启 Codex。
 如果出现 ChatGPT account 不支持该模型的错误，说明请求绕过了网关或使用了

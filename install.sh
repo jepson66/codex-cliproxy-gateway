@@ -86,4 +86,5 @@ printf '%s\n' '  The installer never reads, accepts, or writes provider API keys
 printf '  %s doctor\n' "$installed_gateway"
 printf '%s\n' 'For the optional billable Kimi check:'
 printf '  %s doctor --e2e --model cliproxy/kimi-k3\n' "$installed_gateway"
-printf '%s\n' 'Then fully restart Codex and select cliproxy/kimi-k3 from /model.'
+printf '%s\n' 'Desktop: fully restart Codex, then choose cliproxy/kimi-k3 from the model control beneath the composer.'
+printf '%s\n' 'CLI: restart Codex, enter /model, then choose cliproxy/kimi-k3.'

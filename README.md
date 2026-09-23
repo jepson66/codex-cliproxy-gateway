@@ -6,12 +6,14 @@
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#status)
 
 An experimental local gateway that keeps Codex's official GPT models and adds
-CLIProxyAPI models to the same `/model` picker. Official requests keep ChatGPT
-OAuth; namespaced `cliproxy/*` requests go to a local CLIProxyAPI instance.
+CLIProxyAPI models to the same model catalog. Codex Desktop uses the model
+control beneath the composer; Codex CLI uses `/model`. Official requests keep
+ChatGPT OAuth; namespaced `cliproxy/*` requests go to local CLIProxyAPI.
 
 ```text
-Codex CLI / Desktop
-        │ /model
+Codex Desktop / CLI
+        │ Desktop: model control beneath the composer
+        │ CLI: /model
         ▼
 codex-cliproxy-gateway (127.0.0.1:8765)
         ├── official models ──► ChatGPT Codex (OAuth)
@@ -88,7 +90,7 @@ openai-compatibility:
 Never commit this file or paste a real key into an issue. The Kimi provider key
 and the local CLIProxyAPI access key are different secrets.
 
-## Use `/model`
+## Select a model
 
 Check the local chain:
 
@@ -103,8 +105,15 @@ Optional end-to-end check (may incur a Kimi charge):
 codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
 ```
 
-Fully exit Codex, start a new session, open `/model`, and choose
+**Codex Desktop:** fully quit and reopen the app, start a new chat, then use the
+model and reasoning control beneath the composer to choose
+`cliproxy/kimi-k3`. `Ctrl+Shift+M` opens the model picker.
+
+**Codex CLI:** restart Codex, enter `/model`, and choose
 `cliproxy/kimi-k3`. Official GPT models remain in the same picker.
+
+See [OpenAI's model selection documentation](https://learn.chatgpt.com/docs/models#choose-a-model)
+for the current Desktop control.
 
 If the model is missing, run the official model once, run `catalog`, and restart
 Codex. If Codex says the model is unsupported for a ChatGPT account, the request
