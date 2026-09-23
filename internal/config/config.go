@@ -12,11 +12,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const DefaultConfigName = "codex-cliproxy-gateway.json"
 const CurrentSchemaVersion = 1
+
+const (
+	kimiCodeSetupURL       = "https://www.kimi.com/code"
+	legacyKimiCodeSetupURL = "https://www.kimi.com/code/console"
+	kimiCodeSetupHint      = "Alternatively, keep using a Kimi Code API key by adding it to the local CLIProxyAPI config yourself."
+)
 
 type ModelCapabilities struct {
 	Streaming     bool `json:"streaming"`
@@ -35,6 +42,7 @@ type ProviderSpec struct {
 	ID            string `json:"id"`
 	DisplayName   string `json:"display_name"`
 	SetupURL      string `json:"setup_url"`
+	SetupHint     string `json:"setup_hint,omitempty"`
 	RequiredModel string `json:"required_model"`
 }
 
@@ -51,6 +59,7 @@ type ModelSpec struct {
 	OutputModalities      []string           `json:"output_modalities,omitempty"`
 	ReasoningLevels       []string           `json:"reasoning_levels,omitempty"`
 	DefaultReasoningLevel string             `json:"default_reasoning_level,omitempty"`
+	ReasoningWireFormat   string             `json:"reasoning_wire_format,omitempty"`
 	Capabilities          ModelCapabilities  `json:"capabilities"`
 	Compatibility         ModelCompatibility `json:"compatibility,omitempty"`
 }
@@ -71,6 +80,7 @@ type Config struct {
 	CLIProxyAPIKeyEnv   string         `json:"cliproxy_api_key_env"`
 	CLIProxyAPIKeyFile  string         `json:"cliproxy_api_key_file"`
 	CLIProxyConfigPath  string         `json:"cliproxy_config_path"`
+	CLIProxyAuthDir     string         `json:"cliproxy_auth_dir,omitempty"`
 	ZstdCommand         string         `json:"zstd_command,omitempty"`
 	ModelPrefix         string         `json:"model_prefix"`
 	CodexHome           string         `json:"codex_home"`
@@ -93,6 +103,7 @@ func Default() Config {
 		CLIProxyAPIKeyEnv:   "CLIPROXY_API_KEY",
 		CLIProxyAPIKeyFile:  filepath.Join(codexHome, "codex-cliproxy-gateway", "cliproxy-api-key"),
 		CLIProxyConfigPath:  filepath.Join(home, ".cli-proxy-api", "config.yaml"),
+		CLIProxyAuthDir:     "",
 		ZstdCommand:         "",
 		ModelPrefix:         "cliproxy/",
 		CodexHome:           codexHome,
@@ -103,33 +114,12 @@ func Default() Config {
 			{
 				ID:            "kimi-code",
 				DisplayName:   "Kimi Code",
-				SetupURL:      "https://www.kimi.com/code/console",
-				RequiredModel: "kimi-k3-256k",
+				SetupURL:      kimiCodeSetupURL,
+				SetupHint:     kimiCodeSetupHint,
+				RequiredModel: "kimi-k3",
 			},
 		},
 		Models: []ModelSpec{
-			{
-				ID:                    "kimi-k3-256k",
-				DisplayName:           "Kimi K3 256K",
-				Description:           "Kimi K3 256K via Kimi Code and CLIProxyAPI",
-				ProviderID:            "kimi-code",
-				Route:                 "cliproxy",
-				UpstreamModel:         "kimi-k3-256k",
-				WireAPI:               "responses",
-				ContextWindow:         262_144,
-				InputModalities:       []string{"text", "image"},
-				OutputModalities:      []string{"text"},
-				ReasoningLevels:       []string{"low", "high", "max"},
-				DefaultReasoningLevel: "high",
-				Capabilities: ModelCapabilities{
-					Streaming: true,
-					Tools:     true,
-				},
-				Compatibility: ModelCompatibility{
-					Status:      "experimental",
-					CLIProxyAPI: "7.3.11",
-				},
-			},
 			{
 				ID:                    "kimi-k3",
 				DisplayName:           "Kimi K3",
@@ -143,6 +133,7 @@ func Default() Config {
 				OutputModalities:      []string{"text"},
 				ReasoningLevels:       []string{"low", "high", "max"},
 				DefaultReasoningLevel: "high",
+				ReasoningWireFormat:   "kimi-thinking",
 				Capabilities: ModelCapabilities{
 					Streaming: true,
 					Tools:     true,
@@ -215,8 +206,24 @@ func (c *Config) applyDefaults(legacySchema bool) {
 	if c.SchemaVersion == 0 {
 		c.SchemaVersion = CurrentSchemaVersion
 	}
+	for i := range c.Providers {
+		provider := &c.Providers[i]
+		if provider.ID != "kimi-code" {
+			continue
+		}
+		if provider.SetupURL == legacyKimiCodeSetupURL {
+			provider.SetupURL = kimiCodeSetupURL
+		}
+		if strings.TrimSpace(provider.SetupHint) == "" {
+			provider.SetupHint = kimiCodeSetupHint
+		}
+	}
+	models := c.Models[:0]
 	for i := range c.Models {
 		model := &c.Models[i]
+		if isDeprecatedBundledKimi256K(*model) {
+			continue
+		}
 		if model.Route == "" {
 			model.Route = "cliproxy"
 		}
@@ -235,11 +242,24 @@ func (c *Config) applyDefaults(legacySchema bool) {
 		if model.DefaultReasoningLevel == "" {
 			model.DefaultReasoningLevel = model.ReasoningLevels[0]
 		}
+		if model.ReasoningWireFormat == "" && model.ProviderID == "kimi-code" {
+			model.ReasoningWireFormat = "kimi-thinking"
+		}
 		if legacySchema {
 			model.Capabilities.Streaming = true
 			model.Capabilities.Tools = true
 		}
+		models = append(models, *model)
 	}
+	c.Models = models
+}
+
+func isDeprecatedBundledKimi256K(model ModelSpec) bool {
+	return model.ID == "kimi-k3-256k" &&
+		model.ProviderID == "kimi-code" &&
+		model.UpstreamModel == "kimi-k3-256k" &&
+		model.ContextWindow == 262_144 &&
+		model.Compatibility.CLIProxyAPI == "7.3.11"
 }
 
 func (c *Config) expandPaths() {
@@ -248,6 +268,7 @@ func (c *Config) expandPaths() {
 	c.ModelCatalogPath = ExpandPath(c.ModelCatalogPath)
 	c.CLIProxyAPIKeyFile = ExpandPath(c.CLIProxyAPIKeyFile)
 	c.CLIProxyConfigPath = ExpandPath(c.CLIProxyConfigPath)
+	c.CLIProxyAuthDir = ExpandPath(c.CLIProxyAuthDir)
 	c.ZstdCommand = ExpandPath(c.ZstdCommand)
 }
 
@@ -333,6 +354,72 @@ func (c Config) ImportCLIProxyAPIKey() error {
 		return fmt.Errorf("read CLIProxyAPI config: %w", err)
 	}
 	return errors.New("CLIProxyAPI config has no scalar api-keys entry")
+}
+
+func (c Config) ResolveCLIProxyAuthDir() (string, error) {
+	if configured := strings.TrimSpace(c.CLIProxyAuthDir); configured != "" {
+		return ExpandPath(configured), nil
+	}
+	file, err := os.Open(c.CLIProxyConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return filepath.Dir(c.CLIProxyConfigPath), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("open CLIProxyAPI config to resolve auth-dir: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			continue
+		}
+		key, raw, found := strings.Cut(line, ":")
+		if !found || strings.TrimSpace(key) != "auth-dir" {
+			continue
+		}
+		value, parseErr := parseYAMLScalar(raw)
+		if parseErr != nil {
+			return "", fmt.Errorf("parse CLIProxyAPI auth-dir: %w", parseErr)
+		}
+		if strings.TrimSpace(value) == "" {
+			return "", errors.New("CLIProxyAPI auth-dir is empty")
+		}
+		return ExpandPath(value), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read CLIProxyAPI config to resolve auth-dir: %w", err)
+	}
+	return filepath.Dir(c.CLIProxyConfigPath), nil
+}
+
+func parseYAMLScalar(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(value, `"`) {
+		parsed, err := strconv.Unquote(value)
+		if err != nil {
+			return "", err
+		}
+		return parsed, nil
+	}
+	if strings.HasPrefix(value, "'") {
+		if len(value) < 2 || !strings.HasSuffix(value, "'") {
+			return "", errors.New("unterminated single-quoted value")
+		}
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'"), nil
+	}
+	if before, _, found := strings.Cut(value, " #"); found {
+		value = before
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func ExpandPath(path string) string {
@@ -436,6 +523,9 @@ func (c Config) Validate() error {
 		}
 		if model.DefaultReasoningLevel == "" || !contains(model.ReasoningLevels, model.DefaultReasoningLevel) {
 			return fmt.Errorf("models[%d].default_reasoning_level must be one of reasoning_levels", i)
+		}
+		if model.ReasoningWireFormat != "" && model.ReasoningWireFormat != "openai" && model.ReasoningWireFormat != "kimi-thinking" {
+			return fmt.Errorf("models[%d].reasoning_wire_format %q is unsupported", i, model.ReasoningWireFormat)
 		}
 		if model.Compatibility.Status != "" && model.Compatibility.Status != "verified" && model.Compatibility.Status != "experimental" && model.Compatibility.Status != "unsupported" {
 			return fmt.Errorf("models[%d].compatibility.status %q is invalid", i, model.Compatibility.Status)

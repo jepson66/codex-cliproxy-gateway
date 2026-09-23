@@ -79,8 +79,9 @@ try {
     & $InstalledGateway status
     Write-Host ""
     Write-Host "Installation finished. Run the following before opening Codex:"
-    Write-Host "  Configure your own provider key manually in: $CLIProxyConfig"
-    Write-Host "  The installer never reads, accepts, or writes provider API keys."
+    Write-Host "  $InstalledGateway login kimi-code"
+    Write-Host "  Or configure your own provider API key manually in: $CLIProxyConfig"
+    Write-Host "  OAuth tokens are saved privately in CLIProxyAPI auth-dir; the installer never asks for or prints tokens or API keys."
     Write-Host "  & `"$InstalledGateway`" doctor"
     Write-Host "For the optional billable Kimi check:"
     Write-Host "  & `"$InstalledGateway`" doctor --e2e --model cliproxy/kimi-k3"

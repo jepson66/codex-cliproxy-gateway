@@ -16,6 +16,7 @@ import (
 	"codex-cliproxy-gateway/internal/diagnostics"
 	"codex-cliproxy-gateway/internal/gateway"
 	"codex-cliproxy-gateway/internal/install"
+	"codex-cliproxy-gateway/internal/kimioauth"
 	"codex-cliproxy-gateway/internal/lifecycle"
 	"codex-cliproxy-gateway/internal/lifecycle/dependency"
 	"codex-cliproxy-gateway/internal/providerauth"
@@ -140,6 +141,13 @@ func Run(ctx context.Context, args []string, streams Streams) int {
 		fmt.Fprintln(streams.Out, "restored Codex config backup")
 	case "serve":
 		logger := slog.New(slog.NewTextHandler(streams.Err, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		if authDir, resolveErr := cfg.ResolveCLIProxyAuthDir(); resolveErr == nil {
+			if updated, priorityErr := kimioauth.EnsureCredentialPriority(authDir); priorityErr != nil {
+				logger.Warn("unable to apply Kimi OAuth credential priority", "error", priorityErr)
+			} else if updated > 0 {
+				logger.Info("upgraded Kimi OAuth credential priority", "files", updated)
+			}
+		}
 		server, err := gateway.New(cfg, logger)
 		if err != nil {
 			return fail(streams.Err, err)
@@ -191,8 +199,17 @@ func knownCommand(command string) bool {
 }
 
 type providerCommandDependencies struct {
-	checker providerauth.Checker
-	openURL func(string) error
+	checker        providerauth.Checker
+	openURL        func(string) error
+	kimiOAuth      kimiDeviceFlow
+	saveCredential func(string, kimioauth.Token, string, time.Time) (string, error)
+	now            func() time.Time
+}
+
+type kimiDeviceFlow interface {
+	RequestDeviceCode(context.Context) (kimioauth.DeviceCode, error)
+	PollForToken(context.Context, kimioauth.DeviceCode) (kimioauth.Token, error)
+	DeviceIdentifier() string
 }
 
 func runProviderCommand(ctx context.Context, streams Streams, cfg config.Config, providerID string, login, noBrowser bool, deps providerCommandDependencies) error {
@@ -207,8 +224,14 @@ func runProviderCommand(ctx context.Context, streams Streams, cfg config.Config,
 	if !login {
 		return fmt.Errorf("%s", providerauth.LoginMessage(status.Provider, cfg.CLIProxyConfigPath, false))
 	}
+	if status.Provider.ID == "kimi-code" {
+		return runKimiCodeLogin(ctx, streams, cfg, status.Provider, noBrowser, deps)
+	}
 	fmt.Fprintf(streams.Out, "%s is not configured.\n", status.Provider.DisplayName)
 	fmt.Fprintf(streams.Out, "Setup page: %s\n", status.Provider.SetupURL)
+	if hint := strings.TrimSpace(status.Provider.SetupHint); hint != "" {
+		fmt.Fprintln(streams.Out, hint)
+	}
 	fmt.Fprintf(streams.Out, "CLIProxyAPI config: %s\n", cfg.CLIProxyConfigPath)
 	fmt.Fprintf(streams.Out, "Create the provider credential, add the %s provider block documented in the README, then run:\n", status.Provider.ID)
 	fmt.Fprintf(streams.Out, "  codex-cliproxy-gateway auth-status %s\n", status.Provider.ID)
@@ -223,6 +246,85 @@ func runProviderCommand(ctx context.Context, streams Streams, cfg config.Config,
 		fmt.Fprintf(streams.Err, "warning: %v; open %s manually\n", err, status.Provider.SetupURL)
 	}
 	return nil
+}
+
+func runKimiCodeLogin(ctx context.Context, streams Streams, cfg config.Config, provider config.ProviderSpec, noBrowser bool, deps providerCommandDependencies) error {
+	flow := deps.kimiOAuth
+	if flow == nil {
+		flow = kimioauth.NewClient(Version)
+	}
+	device, err := flow.RequestDeviceCode(ctx)
+	if err != nil {
+		return err
+	}
+	verificationURL := device.VerificationURL()
+	fmt.Fprintln(streams.Out, "Open this one-time Kimi authorization URL:")
+	fmt.Fprintln(streams.Out, verificationURL)
+	if strings.TrimSpace(device.UserCode) != "" {
+		fmt.Fprintln(streams.Out, "User code:", device.UserCode)
+	}
+	if !noBrowser {
+		openURL := deps.openURL
+		if openURL == nil {
+			openURL = providerauth.OpenSetupURL
+		}
+		if err := openURL(verificationURL); err != nil {
+			fmt.Fprintf(streams.Err, "warning: %v; open the authorization URL manually\n", err)
+		}
+	}
+	fmt.Fprintln(streams.Out, "Waiting for Kimi authorization...")
+	token, err := flow.PollForToken(ctx, device)
+	if err != nil {
+		return err
+	}
+	saveCredential := deps.saveCredential
+	if saveCredential == nil {
+		saveCredential = kimioauth.SaveCredential
+	}
+	now := time.Now()
+	if deps.now != nil {
+		now = deps.now()
+	}
+	authDir, err := cfg.ResolveCLIProxyAuthDir()
+	if err != nil {
+		return err
+	}
+	path, err := saveCredential(authDir, token, flow.DeviceIdentifier(), now)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(streams.Out, "Kimi authorization saved securely to %s.\n", path)
+	if err := waitForProvider(ctx, deps.checker, cfg, provider.ID, 5*time.Second); err != nil {
+		return fmt.Errorf("Kimi authorization was saved, but CLIProxyAPI has not loaded it: %w; verify cliproxy_auth_dir and run 'codex-cliproxy-gateway auth-status kimi-code'", err)
+	}
+	fmt.Fprintln(streams.Out, "Kimi Code is configured and available through CLIProxyAPI.")
+	return nil
+}
+
+func waitForProvider(ctx context.Context, checker providerauth.Checker, cfg config.Config, providerID string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		status, err := checker.Check(ctx, cfg, providerID, "")
+		if err == nil && status.Configured {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("required model is not listed yet")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return lastErr
+		case <-ticker.C:
+		}
+	}
 }
 
 func doctor(parent context.Context, output io.Writer, cfg config.Config, e2e bool, model string) bool {

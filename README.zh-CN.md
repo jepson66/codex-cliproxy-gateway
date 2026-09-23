@@ -24,15 +24,14 @@ codex-cliproxy-gateway（127.0.0.1:8765）
 ## 当前状态
 
 - 概念验证项目；managed CLIProxyAPI 模式明确标记为实验性。
-- Kimi Code 使用用户手工填写的订阅 API Key；暂不包含 Kimi OAuth。
+- Kimi Code 支持设备 OAuth；原有的订阅 API Key 手工配置方式继续保留。
 - CI 和 Release 覆盖 macOS、Linux、Windows 的 amd64 与 arm64。
 - 新增模型前，需要单独验证流式输出、工具调用、图片、上下文和 reasoning。
 
 ## 安装预编译版本
 
-前置条件：安装 Codex 并登录 ChatGPT，至少成功运行一次官方模型，在
-[Kimi Code 控制台](https://www.kimi.com/code/console)创建 Kimi Code Key，然后
-完全退出 Codex。
+前置条件：安装 Codex 并登录 ChatGPT，至少成功运行一次官方模型；安装前完全
+退出 Codex。
 
 Gateway 使用 Go 编写，但 Release 已包含编译完成的独立可执行文件。安装器不会
 检测、安装、升级或删除 Go；电脑中已有的 Go 环境不会被修改。只有从源码构建
@@ -60,30 +59,47 @@ sh install.sh
 用户服务。安装器不会读取、接收或写入供应商密钥，也不会覆盖已有 CLIProxyAPI
 配置。
 
-## 配置 Kimi
+## 登录 Kimi
 
-安装后请用户自行编辑 CLIProxyAPI 配置：
+推荐在安装后授权本机使用 Kimi Code：
+
+```sh
+codex-cliproxy-gateway login kimi-code
+```
+
+该命令会打开一次性 Kimi 授权地址、等待用户确认，并把 OAuth 凭据保存到配置的
+CLIProxyAPI 认证目录。它不会调用或依赖 Kimi CLI，也不会输出 access token 或
+refresh token；运行中的 CLIProxyAPI 会热加载新凭据。远程或无桌面环境使用
+`codex-cliproxy-gateway login --no-browser kimi-code`，再手工打开命令显示的地址。
+
+下面的命令可检查 CLIProxyAPI 是否已加载 OAuth 凭据或 API Key：
+
+```sh
+codex-cliproxy-gateway auth-status kimi-code
+```
+
+Codex 只切换模型时不会通知自定义 Provider，因此缺少登录的提示会在发送第一条
+消息后出现，而不是点击模型选项时立即出现。
+
+### 可选：API Key 备用认证
+
+原有 API Key 方式继续支持。请用户自行编辑 CLIProxyAPI 配置：
 
 - macOS/Linux：`~/.cli-proxy-api/config.yaml`
 - Windows：`%USERPROFILE%\.cli-proxy-api\config.yaml`
 
 添加以下 OpenAI 兼容提供商，并将占位符替换为自己的 Kimi Code Key。该 Key
-消耗 Kimi Code 会员订阅额度，不是 Moonshot 开放平台按量计费 Key。
+消耗 Kimi Code 会员订阅额度，不是 Moonshot 开放平台按量计费 Key。请保留
+`priority: 0`，并与 OAuth 共用 `kimi-k3` alias。
 
 ```yaml
 openai-compatibility:
   - name: "kimi-code"
+    priority: 0
     base-url: "https://api.kimi.com/coding/v1"
     api-key-entries:
       - api-key: "<KIMI_CODE_KEY>"
     models:
-      - name: "k3-256k"
-        alias: "kimi-k3-256k"
-        max-context-length: 262144
-        input-modalities: [text, image]
-        output-modalities: [text]
-        thinking:
-          levels: [low, high, max]
       - name: "k3"
         alias: "kimi-k3"
         max-context-length: 1048576
@@ -96,29 +112,17 @@ openai-compatibility:
 不要提交此配置文件或在 Issue 中粘贴真实 Key。Kimi 提供商密钥与本地
 CLIProxyAPI 访问密钥是两个不同的秘密。
 
-已有 Moonshot 开放平台配置仍受支持；除非要切换计费来源，否则不要覆盖它。
-不要同时启用两个使用相同 `kimi-k3` 别名的提供商。
+Codex 中始终只显示一个模型名：`cliproxy/kimi-k3`。Kimi Code OAuth 凭据使用
+优先级 `100`，上述 API Key 提供商使用优先级 `0`。因此 OAuth 可用时
+CLIProxyAPI 只使用 OAuth；OAuth 不存在或不可用时才回退到 API Key。同一个
+`kimi-k3` alias 最多配置一个优先级为 `0` 的 API Key 提供商，不要同时配置
+Kimi Code Key 和 Moonshot 开放平台 Key。Gateway 启动时会安全迁移旧版生成的
+OAuth 文件。
 
-即使还没有配置凭据，Kimi 模型也会保留在 Codex 模型选择器中。发送第一条请求
-时，Gateway 会通过 CLIProxyAPI 检查提供商状态，但不会读取提供商 Key。如果
-没有配置 Kimi Code，或 Kimi 拒绝了当前 Key，Codex CLI 和 Desktop 会显示包含
-以下命令与控制台地址的登录提示：
-
-```sh
-codex-cliproxy-gateway login kimi-code
-```
-
-该命令会打开 Kimi Code 控制台并显示本机配置文件路径。Key 仍由用户自行写入
-`config.yaml`，Gateway 不接收也不复制 Key。可用下面的命令检查 CLIProxyAPI
-是否已经加载该提供商：
-
-```sh
-codex-cliproxy-gateway auth-status kimi-code
-```
-
-远程或无桌面环境使用 `login --no-browser kimi-code`。Codex 不会把“刚刚选择了
-模型”这一事件通知自定义 Provider，因此登录提示会在发送第一条消息时出现，
-而不是点击模型选项时立即出现。
+未配置凭据时，Kimi 模型仍会保留在 Codex 模型选择器中。发送第一条请求时，
+Gateway 会通过 CLIProxyAPI 检查状态，但不会读取提供商秘密。如果 Kimi 缺少或
+拒绝凭据，Codex CLI 和 Desktop 会显示 `login kimi-code` 命令及 API Key 备用
+配置路径。
 
 ## 选择模型
 
@@ -132,17 +136,18 @@ codex-cliproxy-gateway doctor
 可选的端到端检查会调用一次 Kimi，可能产生费用：
 
 ```sh
-codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3-256k
+codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
 ```
 
 **Codex Desktop：** 完全退出并重新打开应用，新建会话，然后点击输入区下方的
-模型与推理控件，选择 `cliproxy/kimi-k3-256k`。也可以按 `Ctrl+Shift+M` 打开模型
+模型与推理控件，选择 `cliproxy/kimi-k3`。也可以按 `Ctrl+Shift+M` 打开模型
 选择器。
 
 **Codex CLI：** 重新启动 Codex，输入 `/model`，选择
-`cliproxy/kimi-k3-256k`。官方 GPT 模型仍在同一个选择器中。
-`cliproxy/kimi-k3` 声明 1M 上下文，需要对应 Kimi 会员档位；默认优先使用
-256K 模型。
+`cliproxy/kimi-k3`。官方 GPT 模型仍在同一个选择器中。OAuth 路径已用这个 1M
+上下文模型验证，需要对应 Kimi 会员档位。默认不再提供 256K 别名，因为 Codex
+加入工具 schema 后，正常请求也可能超过该模型上限。Kimi 的 reasoning 档位会
+转换成其原生 `thinking` 协议。
 
 Desktop 当前入口可参考
 [OpenAI 模型选择文档](https://learn.chatgpt.com/docs/models#choose-a-model)。
@@ -159,7 +164,7 @@ Desktop 当前入口可参考
 | `bootstrap` | 应用已审核的安装计划。 |
 | `catalog` | 重新生成合并模型目录。 |
 | `status` / `doctor` | 检查服务和提供商是否就绪。 |
-| `login` / `auth-status` | 打开提供商配置入口或检查 CLIProxyAPI 是否已加载。 |
+| `login` / `auth-status` | 授权 Kimi 或检查 CLIProxyAPI 是否已加载凭据。 |
 | `serve` | 在前台运行网关。 |
 | `uninstall` | 通过安全检查后恢复 Codex 配置备份。 |
 

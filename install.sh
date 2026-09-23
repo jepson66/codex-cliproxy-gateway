@@ -81,8 +81,9 @@ fi
 installed_gateway="${HOME}/.local/bin/codex-cliproxy-gateway"
 "$installed_gateway" status
 printf '\n%s\n' 'Installation finished. Run:'
-printf '  Configure your own provider key manually in: %s\n' "${HOME}/.cli-proxy-api/config.yaml"
-printf '%s\n' '  The installer never reads, accepts, or writes provider API keys.'
+printf '  %s login kimi-code\n' "$installed_gateway"
+printf '%s\n' '  Or configure your own provider API key manually in ~/.cli-proxy-api/config.yaml.'
+printf '%s\n' '  OAuth tokens are saved privately in CLIProxyAPI auth-dir; the installer never asks for or prints tokens or API keys.'
 printf '  %s doctor\n' "$installed_gateway"
 printf '%s\n' 'For the optional billable Kimi check:'
 printf '  %s doctor --e2e --model cliproxy/kimi-k3\n' "$installed_gateway"

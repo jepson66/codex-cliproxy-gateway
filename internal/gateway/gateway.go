@@ -25,7 +25,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const maxRequestBody = 64 << 20
+const (
+	maxRequestBody                  = 64 << 20
+	officialResponseHeaderTimeout   = 30 * time.Second
+	thirdPartyResponseHeaderTimeout = 2 * time.Minute
+)
 
 type Server struct {
 	cfg          config.Config
@@ -221,6 +225,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !status.Configured {
+				if status.ProviderConfigured && !status.RequestedModelAvailable {
+					writeAPIError(w, http.StatusBadRequest, "provider_model_unavailable", fmt.Sprintf("%s is authenticated, but CLIProxyAPI does not list upstream model %q. Choose another %s model or configure that alias in %s.", status.Provider.DisplayName, spec.UpstreamModel, s.cfg.ModelPrefix, s.cfg.CLIProxyConfigPath))
+					return
+				}
 				writeProviderAuthError(w, status.Provider, s.cfg.CLIProxyConfigPath, false)
 				return
 			}
@@ -329,6 +337,9 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	}
 	rewrittenModel, _ := json.Marshal(spec.UpstreamModel)
 	payload["model"] = rewrittenModel
+	if adaptErr := adaptReasoning(payload, spec); adaptErr != nil {
+		return model, nil, false, adaptErr
+	}
 	rewritten, err = json.Marshal(payload)
 	if err != nil {
 		return model, nil, false, fmt.Errorf("rewrite model: %w", err)
@@ -336,9 +347,70 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	return model, rewritten, true, nil
 }
 
+func adaptReasoning(payload map[string]json.RawMessage, spec config.ModelSpec) error {
+	raw, exists := payload["reasoning"]
+	if !exists || len(spec.ReasoningLevels) == 0 || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var reasoning map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return fmt.Errorf("reasoning must be a JSON object: %w", err)
+	}
+	rawEffort, exists := reasoning["effort"]
+	if !exists {
+		if spec.ReasoningWireFormat == "kimi-thinking" {
+			delete(payload, "reasoning")
+		}
+		return nil
+	}
+	var effort string
+	if err := json.Unmarshal(rawEffort, &effort); err != nil {
+		return fmt.Errorf("reasoning.effort must be a string: %w", err)
+	}
+	if !containsString(spec.ReasoningLevels, effort) {
+		effort = spec.DefaultReasoningLevel
+		if !containsString(spec.ReasoningLevels, effort) {
+			effort = spec.ReasoningLevels[0]
+		}
+	}
+	if spec.ReasoningWireFormat == "kimi-thinking" {
+		thinking, err := json.Marshal(map[string]string{"type": "enabled", "effort": effort})
+		if err != nil {
+			return fmt.Errorf("translate Kimi thinking: %w", err)
+		}
+		delete(payload, "reasoning")
+		payload["thinking"] = thinking
+		return nil
+	}
+	encoded, _ := json.Marshal(effort)
+	reasoning["effort"] = encoded
+	normalized, err := json.Marshal(reasoning)
+	if err != nil {
+		return fmt.Errorf("normalize reasoning.effort: %w", err)
+	}
+	payload["reasoning"] = normalized
+	return nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) newReverseProxy(target *url.URL, thirdParty bool) *httputil.ReverseProxy {
+	responseHeaderTimeout := officialResponseHeaderTimeout
+	if thirdParty {
+		// Third-party coding models can take longer than 30 seconds to emit the
+		// first response event. Keep the official route's tighter timeout while
+		// allowing CLIProxyAPI enough time to establish the response stream.
+		responseHeaderTimeout = thirdPartyResponseHeaderTimeout
+	}
 	proxy := &httputil.ReverseProxy{
-		Transport: defaultTransport(),
+		Transport: defaultTransport(responseHeaderTimeout),
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Codex calls the configured base URL under /v1. Both upstream base
 			// URLs already include their own API root, so remove only the local
@@ -436,9 +508,9 @@ func stripSensitiveHeaders(headers http.Header) {
 	}
 }
 
-func defaultTransport() *http.Transport {
+func defaultTransport(responseHeaderTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.IdleConnTimeout = 120 * time.Second
 	return transport
 }

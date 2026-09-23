@@ -10,8 +10,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"codex-cliproxy-gateway/internal/config"
+	"codex-cliproxy-gateway/internal/kimioauth"
 	"codex-cliproxy-gateway/internal/providerauth"
 )
 
@@ -135,10 +137,11 @@ func TestConfirmHandlesInteractiveAnswers(t *testing.T) {
 	}
 }
 
-func TestProviderLoginGuidanceAndStatus(t *testing.T) {
+func TestProviderLoginPerformsKimiOAuthAndPreservesAPIKeyCompatibility(t *testing.T) {
 	cfg := config.Default()
 	cfg.CLIProxyBaseURL = "http://cliproxy.test/v1"
 	cfg.CLIProxyConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	cfg.CLIProxyAuthDir = filepath.Join(t.TempDir(), "auth")
 	cfg.CLIProxyAPIKeyEnv = "TEST_APP_PROVIDER_KEY"
 	t.Setenv("TEST_APP_PROVIDER_KEY", "local-key")
 
@@ -149,30 +152,41 @@ func TestProviderLoginGuidanceAndStatus(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	opened := ""
 	deps := providerCommandDependencies{
-		checker: checker,
+		checker:   checker,
+		kimiOAuth: &fakeKimiFlow{},
 		openURL: func(url string) error {
 			opened = url
 			return nil
 		},
+		saveCredential: func(dir string, token kimioauth.Token, deviceID string, now time.Time) (string, error) {
+			path, err := kimioauth.SaveCredential(dir, token, deviceID, now)
+			if err == nil {
+				modelsBody = `{"data":[{"id":"kimi-k3"}]}`
+			}
+			return path, err
+		},
+		now: func() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC) },
 	}
 	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", true, false, deps); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Kimi Code is not configured", "https://www.kimi.com/code/console", cfg.CLIProxyConfigPath, "auth-status kimi-code"} {
+	for _, expected := range []string{"one-time Kimi authorization URL", "https://auth.kimi.test/activate?code=ABCD-EFGH", "User code: ABCD-EFGH", "Waiting for Kimi authorization", "saved securely", "configured and available"} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("login output missing %q: %s", expected, stdout.String())
 		}
 	}
-	if opened != "https://www.kimi.com/code/console" {
+	if opened != "https://auth.kimi.test/activate?code=ABCD-EFGH" {
 		t.Fatalf("opened URL = %q", opened)
+	}
+	if strings.Contains(stdout.String(), "secret-access-token") || strings.Contains(stderr.String(), "secret-access-token") {
+		t.Fatal("OAuth token leaked to command output")
+	}
+	entries, err := os.ReadDir(cfg.CLIProxyAuthDir)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "kimi-") {
+		t.Fatalf("credential files = %#v, error = %v", entries, err)
 	}
 
 	stdout.Reset()
-	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", false, true, deps); err == nil || !strings.Contains(err.Error(), "login kimi-code") {
-		t.Fatalf("auth status error = %v", err)
-	}
-
-	modelsBody = `{"data":[{"id":"kimi-k3-256k"},{"id":"kimi-k3"}]}`
 	if err := runProviderCommand(context.Background(), Streams{Out: &stdout, Err: &stderr}, cfg, "kimi-code", false, true, deps); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +194,45 @@ func TestProviderLoginGuidanceAndStatus(t *testing.T) {
 		t.Fatalf("configured output = %s", stdout.String())
 	}
 }
+
+func TestKimiOAuthNoBrowserDoesNotOpenURL(t *testing.T) {
+	cfg := config.Default()
+	cfg.CLIProxyBaseURL = "http://cliproxy.test/v1"
+	cfg.CLIProxyAuthDir = t.TempDir()
+	cfg.CLIProxyAPIKeyEnv = "TEST_APP_NO_BROWSER_KEY"
+	t.Setenv("TEST_APP_NO_BROWSER_KEY", "local-key")
+	modelsBody := `{"data":[{"id":"other-model"}]}`
+	checker := providerauth.Checker{Client: &http.Client{Transport: appRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(modelsBody))}, nil
+	})}}
+	opened := false
+	deps := providerCommandDependencies{
+		checker: checker, kimiOAuth: &fakeKimiFlow{},
+		openURL: func(string) error { opened = true; return nil },
+		saveCredential: func(dir string, token kimioauth.Token, deviceID string, now time.Time) (string, error) {
+			modelsBody = `{"data":[{"id":"kimi-k3"}]}`
+			return kimioauth.SaveCredential(dir, token, deviceID, now)
+		},
+	}
+	if err := runProviderCommand(context.Background(), Streams{Out: io.Discard, Err: io.Discard}, cfg, "kimi-code", true, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	if opened {
+		t.Fatal("browser opener was called with --no-browser")
+	}
+}
+
+type fakeKimiFlow struct{}
+
+func (*fakeKimiFlow) RequestDeviceCode(context.Context) (kimioauth.DeviceCode, error) {
+	return kimioauth.DeviceCode{DeviceCode: "device-secret", UserCode: "ABCD-EFGH", VerificationURIComplete: "https://auth.kimi.test/activate?code=ABCD-EFGH", ExpiresIn: 60}, nil
+}
+
+func (*fakeKimiFlow) PollForToken(context.Context, kimioauth.DeviceCode) (kimioauth.Token, error) {
+	return kimioauth.Token{AccessToken: "secret-access-token", RefreshToken: "secret-refresh-token", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (*fakeKimiFlow) DeviceIdentifier() string { return "device-id" }
 
 type appRoundTripFunc func(*http.Request) (*http.Response, error)
 

@@ -41,7 +41,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Models) != 4 {
+	if len(doc.Models) != 3 {
 		t.Fatalf("model count = %d", len(doc.Models))
 	}
 	if doc.Models[0]["custom"] != "keep-me" || doc.Models[1]["slug"] != "gpt-two" {
@@ -52,7 +52,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 		{"effort": "high", "description": "Reasoning effort: high"},
 		{"effort": "max", "description": "Reasoning effort: max"},
 	}
-	for index, slug := range []string{"cliproxy/kimi-k3-256k", "cliproxy/kimi-k3"} {
+	for index, slug := range []string{"cliproxy/kimi-k3"} {
 		kimi := doc.Models[2+index]
 		if kimi["slug"] != slug {
 			t.Fatalf("Kimi slug = %#v, want %q", kimi["slug"], slug)

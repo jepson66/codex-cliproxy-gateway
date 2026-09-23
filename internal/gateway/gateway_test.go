@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"codex-cliproxy-gateway/internal/config"
 	"github.com/klauspost/compress/zstd"
@@ -88,7 +89,7 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
 	server.official.Transport = officialTransport
 	server.cliproxy.Transport = cliproxyTransport
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello","metadata":{"large":9007199254740993}}`))
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello","reasoning":{"effort":"none","summary":"auto"},"metadata":{"large":9007199254740993}}`))
 	request.Header.Set("Authorization", "Bearer chatgpt-oauth")
 	request.Header.Set("ChatGPT-Account-ID", "account-123")
 	request.Header.Set("Cookie", "session=secret")
@@ -125,6 +126,19 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	}
 	if !strings.Contains(string(payload["metadata"]), "9007199254740993") {
 		t.Fatalf("large JSON number was changed: %s", payload["metadata"])
+	}
+	if _, exists := payload["reasoning"]; exists {
+		t.Fatalf("Codex reasoning object reached Kimi upstream: %s", payload["reasoning"])
+	}
+	var thinking struct {
+		Type   string `json:"type"`
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(payload["thinking"], &thinking); err != nil {
+		t.Fatal(err)
+	}
+	if thinking.Type != "enabled" || thinking.Effort != "high" {
+		t.Fatalf("translated thinking = %#v", thinking)
 	}
 	if officialCalled {
 		t.Fatal("official upstream was called for a prefixed model")
@@ -174,60 +188,86 @@ func TestConfiguredUpstreamModelIsUsed(t *testing.T) {
 	}
 }
 
-func TestKimiCode256KRouteUsesCLIProxyAlias(t *testing.T) {
+func TestDeprecatedKimiCode256KModelFailsClosed(t *testing.T) {
 	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
-	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), `"model":"kimi-k3-256k"`) {
-			t.Fatalf("CLIProxyAPI body = %s", body)
-		}
+	called := false
+	server.cliproxy.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
 		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
 	})
 	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3-256k","input":"hello"}`))
 	recorder := newResponseRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "not configured") {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if called {
+		t.Fatal("deprecated 256K model reached CLIProxyAPI")
 	}
 }
 
 func TestMissingKimiCodeLoginReturnsActionableError(t *testing.T) {
 	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
-	enableKimiCodeAuth(server, "cliproxy/kimi-k3-256k")
+	enableKimiCodeAuth(server, "cliproxy/kimi-k3")
 	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Fatalf("unexpected CLIProxyAPI request: %s %s", r.Method, r.URL.Path)
 		}
 		return testResponse(http.StatusOK, "application/json", `{"data":[{"id":"other-model"}]}`), nil
 	})
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3-256k","input":"hello"}`))
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello"}`))
 	recorder := newResponseRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	for _, expected := range []string{"provider_auth_required", "codex-cliproxy-gateway login kimi-code", "https://www.kimi.com/code/console", server.cfg.CLIProxyConfigPath} {
+	for _, expected := range []string{"provider_auth_required", "codex-cliproxy-gateway login kimi-code", "authorize this device", "https://www.kimi.com/code", "API key", server.cfg.CLIProxyConfigPath} {
 		if !strings.Contains(recorder.Body.String(), expected) {
 			t.Fatalf("body missing %q: %s", expected, recorder.Body.String())
 		}
 	}
 }
 
+func TestAuthenticatedKimiMissingRequestedAliasIsNotReportedAsLoginFailure(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	spec := server.modelSpecs["cliproxy/kimi-k3"]
+	spec.ID = "kimi-test-alias"
+	spec.UpstreamModel = "kimi-test-alias"
+	server.modelSpecs["cliproxy/kimi-test-alias"] = spec
+	enableKimiCodeAuth(server, "cliproxy/kimi-test-alias")
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected CLIProxyAPI request: %s %s", r.Method, r.URL.Path)
+		}
+		return testResponse(http.StatusOK, "application/json", `{"data":[{"id":"kimi-k3"}]}`), nil
+	})
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-test-alias","input":"hello"}`))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "provider_model_unavailable") {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "login kimi-code") {
+		t.Fatalf("missing alias was misreported as login failure: %s", recorder.Body.String())
+	}
+}
+
 func TestInvalidKimiCodeCredentialReturnsActionableError(t *testing.T) {
 	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
-	enableKimiCodeAuth(server, "cliproxy/kimi-k3-256k")
+	enableKimiCodeAuth(server, "cliproxy/kimi-k3")
 	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodGet {
-			return testResponse(http.StatusOK, "application/json", `{"data":[{"id":"kimi-k3-256k"},{"id":"kimi-k3"}]}`), nil
+			return testResponse(http.StatusOK, "application/json", `{"data":[{"id":"kimi-k3"}]}`), nil
 		}
 		resp := testResponse(http.StatusUnauthorized, "application/json", `{"error":{"message":"upstream leaked detail"}}`)
 		resp.Request = r
 		return resp, nil
 	})
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3-256k","input":"hello"}`))
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello"}`))
 	recorder := newResponseRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "kimi_code_credentials_rejected") {
@@ -241,11 +281,11 @@ func TestInvalidKimiCodeCredentialReturnsActionableError(t *testing.T) {
 func TestKimiCodePreflightKeepsCLIProxyOutageDistinctFromLogin(t *testing.T) {
 	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
-	enableKimiCodeAuth(server, "cliproxy/kimi-k3-256k")
+	enableKimiCodeAuth(server, "cliproxy/kimi-k3")
 	server.cliproxy.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	})
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3-256k","input":"hello"}`))
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"cliproxy/kimi-k3","input":"hello"}`))
 	recorder := newResponseRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "login kimi-code") {
@@ -293,10 +333,28 @@ func TestModelsEndpointContainsMergedCatalog(t *testing.T) {
 	for _, item := range envelope.Data {
 		ids[item.ID] = true
 	}
-	for _, id := range []string{"gpt-test", "cliproxy/kimi-k3-256k", "cliproxy/kimi-k3"} {
+	for _, id := range []string{"gpt-test", "cliproxy/kimi-k3"} {
 		if !ids[id] {
 			t.Fatalf("model %q missing from %#v", id, ids)
 		}
+	}
+}
+
+func TestCLIProxyAllowsSlowModelResponseHeaders(t *testing.T) {
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	officialTransport, ok := server.official.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("official transport type = %T", server.official.Transport)
+	}
+	cliproxyTransport, ok := server.cliproxy.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("CLIProxy transport type = %T", server.cliproxy.Transport)
+	}
+	if officialTransport.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("official response header timeout = %s", officialTransport.ResponseHeaderTimeout)
+	}
+	if cliproxyTransport.ResponseHeaderTimeout != 2*time.Minute {
+		t.Fatalf("CLIProxy response header timeout = %s, want 2m", cliproxyTransport.ResponseHeaderTimeout)
 	}
 }
 

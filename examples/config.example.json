@@ -16,35 +16,12 @@
     {
       "id": "kimi-code",
       "display_name": "Kimi Code",
-      "setup_url": "https://www.kimi.com/code/console",
-      "required_model": "kimi-k3-256k"
+      "setup_url": "https://www.kimi.com/code",
+      "setup_hint": "Alternatively, keep using a Kimi Code API key by adding it to the local CLIProxyAPI config yourself.",
+      "required_model": "kimi-k3"
     }
   ],
   "models": [
-    {
-      "id": "kimi-k3-256k",
-      "display_name": "Kimi K3 256K",
-      "description": "Kimi K3 256K via Kimi Code and CLIProxyAPI",
-      "provider_id": "kimi-code",
-      "route": "cliproxy",
-      "upstream_model": "kimi-k3-256k",
-      "wire_api": "responses",
-      "context_window": 262144,
-      "input_modalities": ["text", "image"],
-      "output_modalities": ["text"],
-      "reasoning_levels": ["low", "high", "max"],
-      "default_reasoning_level": "high",
-      "capabilities": {
-        "streaming": true,
-        "tools": true,
-        "parallel_tools": false,
-        "web_search": false
-      },
-      "compatibility": {
-        "status": "experimental",
-        "cliproxyapi": "7.3.11"
-      }
-    },
     {
       "id": "kimi-k3",
       "display_name": "Kimi K3",
@@ -58,6 +35,7 @@
       "output_modalities": ["text"],
       "reasoning_levels": ["low", "high", "max"],
       "default_reasoning_level": "high",
+      "reasoning_wire_format": "kimi-thinking",
       "capabilities": {
         "streaming": true,
         "tools": true,

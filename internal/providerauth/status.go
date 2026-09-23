@@ -13,8 +13,10 @@ import (
 )
 
 type Status struct {
-	Provider   config.ProviderSpec
-	Configured bool
+	Provider                config.ProviderSpec
+	Configured              bool
+	ProviderConfigured      bool
+	RequestedModelAvailable bool
 }
 
 type Checker struct {
@@ -62,7 +64,12 @@ func (c Checker) Check(ctx context.Context, cfg config.Config, providerID, reque
 	if requestedModel != "" {
 		_, hasRequestedModel = models[requestedModel]
 	}
-	return Status{Provider: provider, Configured: hasIdentityModel && hasRequestedModel}, nil
+	return Status{
+		Provider:                provider,
+		Configured:              hasIdentityModel && hasRequestedModel,
+		ProviderConfigured:      hasIdentityModel,
+		RequestedModelAvailable: hasRequestedModel,
+	}, nil
 }
 
 func (c Checker) client() *http.Client {
@@ -77,7 +84,15 @@ func LoginMessage(provider config.ProviderSpec, configPath string, rejected bool
 	if rejected {
 		state = "rejected the configured credentials"
 	}
-	return fmt.Sprintf("%s %s. Run 'codex-cliproxy-gateway login %s' or visit %s. Add or replace the API key in %s, then retry.", provider.DisplayName, state, provider.ID, provider.SetupURL, configPath)
+	parts := []string{
+		fmt.Sprintf("%s %s.", provider.DisplayName, state),
+		fmt.Sprintf("Run 'codex-cliproxy-gateway login %s' to authorize this device.", provider.ID),
+	}
+	if hint := strings.TrimSpace(provider.SetupHint); hint != "" {
+		parts = append(parts, hint)
+	}
+	parts = append(parts, fmt.Sprintf("API key setup page: %s. CLIProxyAPI config: %s. Then retry.", provider.SetupURL, configPath))
+	return strings.Join(parts, " ")
 }
 
 func ErrorCode(providerID, suffix string) string {

@@ -16,7 +16,7 @@ func TestCheckUsesCLIProxyCatalogWithoutReadingProviderKey(t *testing.T) {
 		body       string
 		configured bool
 	}{
-		{"configured", `{"data":[{"id":"kimi-k3-256k"},{"id":"kimi-k3"}]}`, true},
+		{"configured", `{"data":[{"id":"kimi-k3"}]}`, true},
 		{"missing", `{"data":[{"id":"other-model"}]}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -36,6 +36,9 @@ func TestCheckUsesCLIProxyCatalogWithoutReadingProviderKey(t *testing.T) {
 			}
 			if status.Configured != test.configured {
 				t.Fatalf("configured = %v", status.Configured)
+			}
+			if status.ProviderConfigured != test.configured {
+				t.Fatalf("provider configured = %v", status.ProviderConfigured)
 			}
 			if status.Provider.ID != "kimi-code" {
 				t.Fatalf("provider = %#v", status.Provider)

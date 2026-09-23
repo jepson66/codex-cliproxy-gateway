@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,15 +12,17 @@ import (
 
 func TestDefaultKimiCodeModels(t *testing.T) {
 	cfg := Default()
-	if len(cfg.Providers) != 1 || cfg.Providers[0].ID != "kimi-code" || cfg.Providers[0].SetupURL != "https://www.kimi.com/code/console" {
+	if len(cfg.Providers) != 1 || cfg.Providers[0].ID != "kimi-code" || cfg.Providers[0].SetupURL != "https://www.kimi.com/code" {
 		t.Fatalf("default providers = %#v", cfg.Providers)
+	}
+	if !strings.Contains(cfg.Providers[0].SetupHint, "API key") || !strings.Contains(cfg.Providers[0].SetupHint, "CLIProxyAPI") {
+		t.Fatalf("default Kimi setup hint = %q", cfg.Providers[0].SetupHint)
 	}
 	want := map[string]struct {
 		upstream string
 		context  int64
 	}{
-		"kimi-k3-256k": {upstream: "kimi-k3-256k", context: 262_144},
-		"kimi-k3":      {upstream: "kimi-k3", context: 1_048_576},
+		"kimi-k3": {upstream: "kimi-k3", context: 1_048_576},
 	}
 	if len(cfg.Models) != len(want) {
 		t.Fatalf("default model count = %d, want %d", len(cfg.Models), len(want))
@@ -41,6 +44,117 @@ func TestDefaultKimiCodeModels(t *testing.T) {
 		if model.DefaultReasoningLevel != "high" {
 			t.Fatalf("model %q default reasoning = %q", model.ID, model.DefaultReasoningLevel)
 		}
+	}
+}
+
+func TestLoadRemovesDeprecatedBundledKimi256KModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.json")
+	data := []byte(`{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "kimi-k3-256k",
+      "provider_id": "kimi-code",
+      "upstream_model": "kimi-k3-256k",
+      "context_window": 262144,
+      "capabilities": {"streaming": true, "tools": true},
+      "compatibility": {"status": "experimental", "cliproxyapi": "7.3.11"}
+    },
+    {
+      "id": "kimi-k3",
+      "provider_id": "kimi-code",
+      "upstream_model": "kimi-k3",
+      "context_window": 1048576,
+      "input_modalities": ["text", "image"],
+      "output_modalities": ["text"],
+      "capabilities": {"streaming": true, "tools": true},
+      "compatibility": {"status": "experimental", "cliproxyapi": "7.3.11"}
+    }
+  ]
+}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Models) != 1 || loaded.Models[0].ID != "kimi-k3" {
+		t.Fatalf("models after migration = %#v", loaded.Models)
+	}
+}
+
+func TestLoadMigratesLegacyKimiConsoleDeepLink(t *testing.T) {
+	cfg := Default()
+	cfg.Providers[0].SetupURL = "https://www.kimi.com/code/console"
+	cfg.Providers[0].SetupHint = ""
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := loaded.Provider("kimi-code")
+	if !ok {
+		t.Fatal("Kimi Code provider is missing")
+	}
+	if provider.SetupURL != "https://www.kimi.com/code" {
+		t.Fatalf("migrated setup URL = %q", provider.SetupURL)
+	}
+	if !strings.Contains(provider.SetupHint, "API key") || !strings.Contains(provider.SetupHint, "CLIProxyAPI") {
+		t.Fatalf("migrated setup hint = %q", provider.SetupHint)
+	}
+}
+
+func TestLoadDerivesCLIProxyAuthDirForExistingConfigs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "gateway.json")
+	proxyConfigPath := filepath.Join(dir, "custom-proxy", "config.yaml")
+	wantAuthDir := filepath.Join(dir, "custom-proxy", "auth")
+	if err := os.MkdirAll(filepath.Dir(proxyConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyConfigPath, []byte("auth-dir: \""+wantAuthDir+"\"\napi-keys:\n  - \"secret-not-read-by-resolver\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{
+  "schema_version": 1,
+  "cliproxy_config_path": "` + proxyConfigPath + `"
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotAuthDir, err := cfg.ResolveCLIProxyAuthDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuthDir != wantAuthDir {
+		t.Fatalf("cliproxy auth dir = %q", gotAuthDir)
+	}
+}
+
+func TestResolveCLIProxyAuthDirOverrideAndFallback(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.CLIProxyConfigPath = filepath.Join(dir, "config.yaml")
+	if got, err := cfg.ResolveCLIProxyAuthDir(); err != nil || got != dir {
+		t.Fatalf("fallback = %q, %v", got, err)
+	}
+	cfg.CLIProxyAuthDir = filepath.Join(dir, "override")
+	if got, err := cfg.ResolveCLIProxyAuthDir(); err != nil || got != cfg.CLIProxyAuthDir {
+		t.Fatalf("override = %q, %v", got, err)
 	}
 }
 
