@@ -133,12 +133,9 @@ go build ./cmd/codex-cliproxy-gateway
 sh scripts/check-secrets.sh
 ```
 
-## Security and license
+## Security
 
 The Gateway listens on loopback by default, allowlists `cliproxy/*` model IDs,
 strips ChatGPT credentials before third-party forwarding, and logs no headers,
 bodies, or API keys. Third-party retention, billing, quotas, prompts, and tool
 output remain governed by that provider.
-
-No license has been selected yet. Public visibility does not grant reuse or
-redistribution rights until a license is added.

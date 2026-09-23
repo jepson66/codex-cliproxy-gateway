@@ -129,10 +129,8 @@ go build ./cmd/codex-cliproxy-gateway
 sh scripts/check-secrets.sh
 ```
 
-## 安全与许可证
+## 安全
 
 网关默认只监听 loopback，仅允许配置过的 `cliproxy/*` 模型，转发第三方请求前
 会移除 ChatGPT 凭据，日志不记录请求头、请求体或 API Key。第三方的数据保留、
 计费、配额、提示词和工具输出由对应提供商负责。
-
-项目目前尚未选择许可证。公开仓库不等于授予再使用或再分发权。
