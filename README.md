@@ -28,10 +28,15 @@ codex-cliproxy-gateway (127.0.0.1:8765)
 - New providers need their own streaming, tool-call, image, context, and
   reasoning tests.
 
-## Install without Go
+## Install a prebuilt release
 
 Prerequisites: install Codex, sign in with ChatGPT, run one official model once,
 create a Kimi API key, and fully exit Codex.
+
+The Gateway is written in Go, but release archives contain a compiled,
+standalone executable. The installer does not check, install, upgrade, or
+remove Go. An existing Go installation is left untouched. Go is required only
+when building the project from source.
 
 ### Windows
 
@@ -51,7 +56,7 @@ less install.sh
 sh install.sh
 ```
 
-The installer downloads a prebuilt Gateway, verifies SHA-256, and installs the
+The installer downloads the prebuilt Gateway, verifies SHA-256, and installs the
 pinned CLIProxyAPI release as a per-user service. It never reads, accepts, or
 writes provider keys. Existing CLIProxyAPI configuration is preserved.
 

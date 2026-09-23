@@ -26,10 +26,14 @@ codex-cliproxy-gateway（127.0.0.1:8765）
 - CI 和 Release 覆盖 macOS、Linux、Windows 的 amd64 与 arm64。
 - 新增模型前，需要单独验证流式输出、工具调用、图片、上下文和 reasoning。
 
-## 无需 Go 的安装
+## 安装预编译版本
 
 前置条件：安装 Codex 并登录 ChatGPT，至少成功运行一次官方模型，创建 Kimi
 API Key，然后完全退出 Codex。
+
+Gateway 使用 Go 编写，但 Release 已包含编译完成的独立可执行文件。安装器不会
+检测、安装、升级或删除 Go；电脑中已有的 Go 环境不会被修改。只有从源码构建
+项目时才需要 Go。
 
 ### Windows
 
