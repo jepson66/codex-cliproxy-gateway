@@ -27,8 +27,6 @@ func (r Runner) Run(ctx context.Context, cfg config.Config, e2e bool, modelID st
 	results := []Result{{Name: "config", Err: cfg.Validate()}}
 	_, catalogErr := catalog.Generate(cfg)
 	results = append(results, Result{Name: "official model cache", Err: catalogErr})
-	_, zstdErr := cfg.ResolveZstdCommand()
-	results = append(results, Result{Name: "zstd request decoder", Err: zstdErr})
 
 	key, keyErr := cfg.ResolveCLIProxyAPIKey()
 	results = append(results, Result{Name: "CLIProxyAPI key", Err: keyErr})

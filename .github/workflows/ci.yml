@@ -25,6 +25,22 @@ jobs:
           cache: true
       - name: Check formatting
         run: test -z "$(gofmt -l cmd internal)"
+      - name: Check shell installer syntax
+        run: bash -n install.sh scripts/build-release.sh scripts/check-secrets.sh
+      - name: Check PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+          }
       - name: Check tracked files for secrets
         run: sh scripts/check-secrets.sh
       - name: Vet

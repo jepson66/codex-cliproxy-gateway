@@ -21,6 +21,7 @@ import (
 
 	"codex-cliproxy-gateway/internal/catalog"
 	"codex-cliproxy-gateway/internal/config"
+	"github.com/klauspost/compress/zstd"
 )
 
 const maxRequestBody = 64 << 20
@@ -55,16 +56,13 @@ func New(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	cliproxyKey, _ := cfg.ResolveCLIProxyAPIKey()
-	zstdCommand, _ := cfg.ResolveZstdCommand()
 	s := &Server{
 		cfg:         cfg,
 		logger:      logger,
 		cliproxyKey: cliproxyKey,
-		decodeZstd: func(body []byte) ([]byte, error) {
-			return decompressZstd(zstdCommand, body)
-		},
-		catalog:    doc,
-		modelSpecs: make(map[string]config.ModelSpec),
+		decodeZstd:  decompressZstd,
+		catalog:     doc,
+		modelSpecs:  make(map[string]config.ModelSpec),
 	}
 	for _, model := range cfg.Models {
 		if model.Compatibility.Status != "unsupported" {
@@ -274,33 +272,21 @@ func hasContentEncoding(headers http.Header, expected string) bool {
 	return false
 }
 
-func decompressZstd(command string, body []byte) ([]byte, error) {
-	if command == "" {
-		return nil, errors.New("zstd command is not configured")
-	}
-	cmd := exec.Command(command, "-d", "-q", "-c")
-	cmd.Stdin = bytes.NewReader(body)
-	stdout, err := cmd.StdoutPipe()
+func decompressZstd(body []byte) ([]byte, error) {
+	decoder, err := zstd.NewReader(bytes.NewReader(body),
+		zstd.WithDecoderMaxMemory(uint64(maxRequestBody)),
+		zstd.WithDecoderConcurrency(1),
+	)
 	if err != nil {
 		return nil, err
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	decoded, readErr := io.ReadAll(io.LimitReader(stdout, maxRequestBody+1))
+	defer decoder.Close()
+	decoded, readErr := io.ReadAll(io.LimitReader(decoder, maxRequestBody+1))
 	if int64(len(decoded)) > maxRequestBody {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
 		return nil, errors.New("decompressed request body is too large")
 	}
-	waitErr := cmd.Wait()
 	if readErr != nil {
 		return nil, readErr
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("zstd failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
 	}
 	return decoded, nil
 }

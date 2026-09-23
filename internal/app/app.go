@@ -21,7 +21,7 @@ import (
 	"codex-cliproxy-gateway/internal/service"
 )
 
-const Version = "0.1.0-poc"
+var Version = "0.1.0-dev"
 
 type Streams struct {
 	In         io.Reader

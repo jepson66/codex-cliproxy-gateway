@@ -1,6 +1,9 @@
 /bin/
 /codex-cliproxy-gateway
 /.gocache/
+/.gomodcache/
+/.release-test/
+/dist/
 /.runtime/
 /docs/
 

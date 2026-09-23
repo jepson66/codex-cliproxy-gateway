@@ -72,12 +72,7 @@ func testConfig(t *testing.T) config.Config {
 	if err := os.WriteFile(cachePath, []byte(`{"models":[{"slug":"gpt-test"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	zstdPath := filepath.Join(dir, "zstd")
-	if err := os.WriteFile(zstdPath, []byte("test"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Default()
 	cfg.OfficialModelsCache = cachePath
-	cfg.ZstdCommand = zstdPath
 	return cfg
 }

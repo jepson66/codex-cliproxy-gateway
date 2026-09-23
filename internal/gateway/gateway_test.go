@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"codex-cliproxy-gateway/internal/config"
+	"github.com/klauspost/compress/zstd"
 )
 
 type receivedRequest struct {
@@ -274,6 +275,23 @@ func TestZstdRoutingPassesOfficialThroughAndDecodesThirdParty(t *testing.T) {
 			t.Fatalf("CLIProxyAPI body = %s", upstream.body)
 		}
 	})
+}
+
+func TestEmbeddedZstdDecoder(t *testing.T) {
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { encoder.Close() })
+	want := []byte(`{"model":"cliproxy/kimi-k3","input":"hello"}`)
+	compressed := encoder.EncodeAll(want, nil)
+	got, err := decompressZstd(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded body = %q, want %q", got, want)
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
