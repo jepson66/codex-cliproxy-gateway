@@ -15,8 +15,6 @@ type Document struct {
 	Models []map[string]any `json:"models"`
 }
 
-const thirdPartyIdentityPreamble = "You are the underlying model selected by the user, operating as an AI coding agent inside the Codex host. If asked about your identity, report that underlying model and provider truthfully, and distinguish them from the Codex host. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled."
-
 func Generate(cfg config.Config) (Document, error) {
 	data, err := os.ReadFile(cfg.OfficialModelsCache)
 	if err != nil {
@@ -118,12 +116,12 @@ func thirdPartyModelMessages(value any) map[string]any {
 
 func thirdPartyInstructions(instructions string) string {
 	if instructions == "" {
-		return thirdPartyIdentityPreamble
+		return ""
 	}
 	// The official catalog currently starts with a model-identity paragraph.
-	// Replace that paragraph only when it is actually an official Codex/GPT
-	// identity; otherwise keep the complete template and prepend our neutral
-	// identity guidance. This makes catalog schema/content drift fail safe.
+	// Remove that paragraph only when it is actually an official Codex/GPT
+	// identity. Keep all other host instructions, but do not replace the removed
+	// identity with provider-specific or generic identity guidance.
 	firstParagraph := instructions
 	remainder := ""
 	if paragraphEnd := strings.Index(instructions, "\n\n"); paragraphEnd >= 0 {
@@ -134,10 +132,7 @@ func thirdPartyInstructions(instructions string) string {
 		instructions = remainder
 	}
 	instructions = strings.ReplaceAll(instructions, "As Codex,", "As an AI coding agent,")
-	if instructions == "" {
-		return thirdPartyIdentityPreamble
-	}
-	return thirdPartyIdentityPreamble + "\n\n" + instructions
+	return instructions
 }
 
 func Write(cfg config.Config) error {

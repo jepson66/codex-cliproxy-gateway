@@ -77,11 +77,20 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 		t.Fatalf("Kimi instructions template = %#v", kimi["model_messages"])
 	}
 	instructions, _ := messages["instructions_template"].(string)
-	if strings.Contains(instructions, "based on GPT") || strings.Contains(instructions, "As Codex") {
-		t.Fatalf("Kimi inherited official model identity: %q", instructions)
+	for _, identityPrompt := range []string{
+		"based on GPT",
+		"As Codex",
+		"underlying model",
+		"report that underlying model and provider truthfully",
+		"Kimi",
+		"Moonshot",
+	} {
+		if strings.Contains(instructions, identityPrompt) {
+			t.Fatalf("Kimi instructions contain identity prompt %q: %q", identityPrompt, instructions)
+		}
 	}
-	if !strings.Contains(instructions, "report that underlying model and provider truthfully") {
-		t.Fatalf("Kimi identity guidance missing: %q", instructions)
+	if instructions != "As an AI coding agent, stay helpful." {
+		t.Fatalf("Kimi operational instructions changed: %q", instructions)
 	}
 	if messages["persistent_instructions"] != "preserve operational guidance" {
 		t.Fatalf("Kimi operational model messages changed: %#v", messages)
@@ -95,14 +104,9 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 func TestThirdPartyInstructionsPreserveUnknownTemplatePreamble(t *testing.T) {
 	input := "Follow the host security policy exactly.\n\nAs Codex, keep working until the task is complete."
 	got := thirdPartyInstructions(input)
-	if !strings.Contains(got, "Follow the host security policy exactly.") {
-		t.Fatalf("non-identity preamble was removed: %q", got)
-	}
-	if strings.Contains(got, "As Codex,") {
-		t.Fatalf("official persona wording remains: %q", got)
-	}
-	if !strings.Contains(got, "As an AI coding agent, keep working") {
-		t.Fatalf("operational instruction was not preserved: %q", got)
+	want := "Follow the host security policy exactly.\n\nAs an AI coding agent, keep working until the task is complete."
+	if got != want {
+		t.Fatalf("third-party instructions = %q, want %q", got, want)
 	}
 }
 
@@ -112,10 +116,12 @@ func TestThirdPartyModelMessagesWithoutOfficialTemplate(t *testing.T) {
 		t.Fatalf("unexpected generated messages: %#v", messages)
 	}
 	got, _ := messages["instructions_template"].(string)
-	if got != thirdPartyIdentityPreamble {
+	if got != "" {
 		t.Fatalf("generated instructions = %q", got)
 	}
-	if strings.Contains(got, "GPT") || strings.Contains(got, "As Codex") {
-		t.Fatalf("generated instructions inherited official identity: %q", got)
+	for _, identityPrompt := range []string{"GPT", "Codex", "Kimi", "Moonshot", "underlying model"} {
+		if strings.Contains(got, identityPrompt) {
+			t.Fatalf("generated instructions contain identity prompt %q: %q", identityPrompt, got)
+		}
 	}
 }
