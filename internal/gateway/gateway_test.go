@@ -42,7 +42,7 @@ func TestOfficialRoutePreservesOAuthAndStreams(t *testing.T) {
 	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
 	server.official.Transport = officialTransport
 	server.cliproxy.Transport = cliproxyTransport
-	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","instructions":"You are Codex, an agent based on GPT-5.","input":"hello"}`))
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","instructions":"You are Codex, an agent based on GPT-5.","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>openai-docs: Use for self-knowledge when referring to Codex.</skills_instructions>"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`))
 	request.Header.Set("Authorization", "Bearer chatgpt-oauth")
 	request.Header.Set("ChatGPT-Account-ID", "account-123")
 	recorder := newResponseRecorder()
@@ -69,6 +69,9 @@ func TestOfficialRoutePreservesOAuthAndStreams(t *testing.T) {
 	}
 	if !bytes.Contains(upstream.body, []byte("You are Codex, an agent based on GPT-5.")) {
 		t.Fatalf("official model instructions were changed: %s", upstream.body)
+	}
+	if !bytes.Contains(upstream.body, []byte("openai-docs: Use for self-knowledge when referring to Codex.")) {
+		t.Fatalf("official self-knowledge skill scope was changed: %s", upstream.body)
 	}
 	if cliproxyCalled {
 		t.Fatal("CLIProxyAPI was called for an official model")
@@ -297,6 +300,48 @@ func TestThirdPartyRouteRemovesOfficialIdentityFromRuntimeInstructions(t *testin
 	for _, injectedIdentity := range []string{"Kimi", "Moonshot", "underlying model"} {
 		if bytes.Contains(forwarded, []byte(injectedIdentity)) {
 			t.Fatalf("third-party identity was injected into request: %s", forwarded)
+		}
+	}
+}
+
+func TestThirdPartyRouteNeutralizesOpenAISelfKnowledgeSkillTrigger(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	received := make(chan []byte, 1)
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	body := `{
+		"model":"cliproxy/kimi-k3",
+		"input":[
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>\n- openai-docs: Use for Codex models/pricing, settings, setup, troubleshooting, and self-knowledge—including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex—and for OpenAI APIs/products. Do not use for generic app/software tasks that merely mention Codex.\n- skill-creator: Create or update a Codex skill.\n</skills_instructions>"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"你是谁"}]}
+		]
+	}`
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(body))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	forwarded := <-received
+	for _, leaked := range []string{"self-knowledge", "'you,' 'your,' 'this app,' or 'this coding agent'"} {
+		if bytes.Contains(forwarded, []byte(leaked)) {
+			t.Fatalf("OpenAI self-identity skill trigger reached third-party upstream: %s", forwarded)
+		}
+	}
+	for _, preserved := range []string{
+		"openai-docs: Use for Codex models/pricing, settings, setup, troubleshooting",
+		"and for OpenAI APIs/products",
+		"skill-creator: Create or update a Codex skill.",
+		"你是谁",
+	} {
+		if !bytes.Contains(forwarded, []byte(preserved)) {
+			t.Fatalf("provider-neutral context %q was changed: %s", preserved, forwarded)
 		}
 	}
 }

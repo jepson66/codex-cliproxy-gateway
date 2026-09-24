@@ -391,6 +391,9 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	if adaptErr := dropUnsupportedThirdPartyInput(payload); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
+	if adaptErr := sanitizeThirdPartyDeveloperInput(payload); adaptErr != nil {
+		return model, nil, false, adaptErr
+	}
 	if adaptErr := filterThirdPartyTools(payload, spec.ExcludedToolNamespacePrefixes); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
@@ -561,6 +564,113 @@ func dropUnsupportedThirdPartyInput(payload map[string]json.RawMessage) error {
 	}
 	payload["input"] = normalizedInput
 	return nil
+}
+
+// sanitizeThirdPartyDeveloperInput removes only provider-specific identity
+// routing from host-supplied developer context. The OpenAI documentation skill
+// remains available for actual OpenAI product questions, but it must not act as
+// the source of truth for a third-party model's own identity.
+func sanitizeThirdPartyDeveloperInput(payload map[string]json.RawMessage) error {
+	rawInput, exists := payload["input"]
+	if !exists || len(bytes.TrimSpace(rawInput)) == 0 || bytes.Equal(bytes.TrimSpace(rawInput), []byte("null")) {
+		return nil
+	}
+	var input []json.RawMessage
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return nil
+	}
+
+	changed := false
+	for itemIndex, rawItem := range input {
+		var item map[string]json.RawMessage
+		if json.Unmarshal(rawItem, &item) != nil {
+			continue
+		}
+		var role string
+		_ = json.Unmarshal(item["role"], &role)
+		if role != "developer" {
+			continue
+		}
+		var content []map[string]json.RawMessage
+		if json.Unmarshal(item["content"], &content) != nil {
+			continue
+		}
+		itemChanged := false
+		for contentIndex := range content {
+			var text string
+			if json.Unmarshal(content[contentIndex]["text"], &text) != nil {
+				continue
+			}
+			sanitized := sanitizeOpenAISelfKnowledgeSkillScope(text)
+			if sanitized == text {
+				continue
+			}
+			content[contentIndex]["text"], _ = json.Marshal(sanitized)
+			itemChanged = true
+		}
+		if !itemChanged {
+			continue
+		}
+		encodedContent, err := json.Marshal(content)
+		if err != nil {
+			return fmt.Errorf("sanitize third-party developer content: %w", err)
+		}
+		item["content"] = encodedContent
+		encodedItem, err := json.Marshal(item)
+		if err != nil {
+			return fmt.Errorf("sanitize third-party developer item: %w", err)
+		}
+		input[itemIndex] = encodedItem
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	normalizedInput, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("sanitize third-party developer input: %w", err)
+	}
+	payload["input"] = normalizedInput
+	return nil
+}
+
+func sanitizeOpenAISelfKnowledgeSkillScope(text string) string {
+	if !strings.Contains(text, "<skills_instructions>") || !strings.Contains(text, "openai-docs:") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	changed := false
+	for index, line := range lines {
+		if !strings.Contains(line, "openai-docs:") || !strings.Contains(line, "self-knowledge") {
+			continue
+		}
+		start := strings.Index(line, ", and self-knowledge")
+		if start < 0 {
+			start = strings.Index(line, " and self-knowledge")
+		}
+		if start < 0 {
+			continue
+		}
+		remainder := line[start:]
+		end := -1
+		endMarker := ""
+		for _, marker := range []string{"—and for ", "–and for ", "-and for "} {
+			if candidate := strings.Index(remainder, marker); candidate >= 0 {
+				end = candidate
+				endMarker = marker
+				break
+			}
+		}
+		if end < 0 {
+			continue
+		}
+		lines[index] = line[:start] + ", and for " + remainder[end+len(endMarker):]
+		changed = true
+	}
+	if !changed {
+		return text
+	}
+	return strings.Join(lines, "\n")
 }
 
 // sanitizeOfficialReasoning removes reasoning items whose encrypted payload is
