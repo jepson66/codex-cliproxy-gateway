@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -30,6 +31,7 @@ const (
 	maxRequestBody                  = 64 << 20
 	officialResponseHeaderTimeout   = 30 * time.Second
 	thirdPartyResponseHeaderTimeout = 2 * time.Minute
+	modelSwitchAttribution          = "Assistant messages recorded before this switch were produced under the previous model. Attribute model-identity claims in those messages to that previous model, not to the current model. Answer the user's current request directly; do not correct or apologize for the previous model's self-identification."
 )
 
 type Server struct {
@@ -205,6 +207,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	routingBody, modelSwitchChanged, err := annotateModelSwitch(routingBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	model, rewritten, thirdParty, err := routeBody(routingBody, s.cfg.ModelPrefix, s.modelSpecs)
 	if err != nil {
@@ -243,12 +250,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	officialBody, changed, err := sanitizeOfficialReasoning(routingBody)
+	officialBody, reasoningChanged, err := sanitizeOfficialReasoning(routingBody)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !changed {
+	if !modelSwitchChanged && !reasoningChanged {
 		officialBody = body
 	} else {
 		r.Header.Del("Content-Encoding")
@@ -263,26 +270,49 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, handler htt
 	requestID := newRequestID()
 	w.Header().Set("X-Codex-Cliproxy-Request-ID", requestID)
 	r.Header.Set("X-Codex-Cliproxy-Request-ID", requestID)
-	recorder := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	started := time.Now()
+	recorder := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	handler.ServeHTTP(recorder, r)
+	ttfbMillis := int64(-1)
+	if !recorder.firstWrite.IsZero() {
+		ttfbMillis = recorder.firstWrite.Sub(started).Milliseconds()
+	}
 	s.logger.Info("request completed",
 		"request_id", requestID,
 		"route", route,
 		"model", model,
 		"status", recorder.status,
+		"request_bytes", r.ContentLength,
+		"response_bytes", recorder.bytesWritten,
+		"ttfb_ms", ttfbMillis,
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
 }
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status       int
+	firstWrite   time.Time
+	bytesWritten int64
 }
 
 func (w *statusWriter) WriteHeader(status int) {
+	w.recordFirstWrite()
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(body []byte) (int, error) {
+	w.recordFirstWrite()
+	n, err := w.ResponseWriter.Write(body)
+	w.bytesWritten += int64(n)
+	return n, err
+}
+
+func (w *statusWriter) recordFirstWrite() {
+	if w.firstWrite.IsZero() {
+		w.firstWrite = time.Now()
+	}
 }
 
 func (w *statusWriter) Flush() {
@@ -352,6 +382,9 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	if adaptErr := dropUnsupportedThirdPartyInput(payload); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
+	if adaptErr := filterThirdPartyTools(payload, spec.ExcludedToolNamespacePrefixes); adaptErr != nil {
+		return model, nil, false, adaptErr
+	}
 	if adaptErr := adaptReasoning(payload, spec); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
@@ -360,6 +393,129 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 		return model, nil, false, fmt.Errorf("rewrite model: %w", err)
 	}
 	return model, rewritten, true, nil
+}
+
+func annotateModelSwitch(body []byte) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body, false, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false, fmt.Errorf("request body must be JSON: %w", err)
+	}
+	rawInput, exists := payload["input"]
+	if !exists || len(bytes.TrimSpace(rawInput)) == 0 || bytes.Equal(bytes.TrimSpace(rawInput), []byte("null")) {
+		return body, false, nil
+	}
+	var input []json.RawMessage
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return body, false, nil
+	}
+	changed := false
+	for itemIndex, rawItem := range input {
+		var item map[string]json.RawMessage
+		if json.Unmarshal(rawItem, &item) != nil {
+			continue
+		}
+		var role string
+		_ = json.Unmarshal(item["role"], &role)
+		if role != "developer" {
+			continue
+		}
+		var content []map[string]json.RawMessage
+		if json.Unmarshal(item["content"], &content) != nil {
+			continue
+		}
+		itemChanged := false
+		for contentIndex := range content {
+			var text string
+			if json.Unmarshal(content[contentIndex]["text"], &text) != nil ||
+				!strings.Contains(text, "<model_switch>") ||
+				strings.Contains(text, modelSwitchAttribution) {
+				continue
+			}
+			if strings.Contains(text, "</model_switch>") {
+				text = strings.Replace(text, "</model_switch>", "\n"+modelSwitchAttribution+"\n</model_switch>", 1)
+			} else {
+				text += "\n" + modelSwitchAttribution
+			}
+			encodedText, _ := json.Marshal(text)
+			content[contentIndex]["text"] = encodedText
+			itemChanged = true
+		}
+		if !itemChanged {
+			continue
+		}
+		encodedContent, err := json.Marshal(content)
+		if err != nil {
+			return nil, false, fmt.Errorf("annotate model switch content: %w", err)
+		}
+		item["content"] = encodedContent
+		encodedItem, err := json.Marshal(item)
+		if err != nil {
+			return nil, false, fmt.Errorf("annotate model switch item: %w", err)
+		}
+		input[itemIndex] = encodedItem
+		changed = true
+	}
+	if !changed {
+		return body, false, nil
+	}
+	normalizedInput, err := json.Marshal(input)
+	if err != nil {
+		return nil, false, fmt.Errorf("annotate model switch input: %w", err)
+	}
+	payload["input"] = normalizedInput
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, fmt.Errorf("rewrite model switch request: %w", err)
+	}
+	return rewritten, true, nil
+}
+
+func filterThirdPartyTools(payload map[string]json.RawMessage, excludedNamespacePrefixes []string) error {
+	if len(excludedNamespacePrefixes) == 0 {
+		return nil
+	}
+	rawTools, exists := payload["tools"]
+	if !exists || len(bytes.TrimSpace(rawTools)) == 0 || bytes.Equal(bytes.TrimSpace(rawTools), []byte("null")) {
+		return nil
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return nil
+	}
+	filtered := make([]json.RawMessage, 0, len(tools))
+	changed := false
+	for _, rawTool := range tools {
+		var tool struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(rawTool, &tool) == nil && tool.Type == "namespace" && hasAnyPrefix(tool.Name, excludedNamespacePrefixes) {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, rawTool)
+	}
+	if !changed {
+		return nil
+	}
+	normalizedTools, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("filter third-party tools: %w", err)
+	}
+	payload["tools"] = normalizedTools
+	return nil
+}
+
+func hasAnyPrefix(value string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // dropUnsupportedThirdPartyInput removes provider-private Codex state that is
@@ -502,7 +658,7 @@ func adaptReasoning(payload map[string]json.RawMessage, spec config.ModelSpec) e
 		}
 	}
 	if spec.ReasoningWireFormat == "kimi-thinking" {
-		thinking, err := json.Marshal(map[string]string{"type": "enabled", "effort": effort})
+		thinking, err := json.Marshal(map[string]string{"type": "disabled"})
 		if err != nil {
 			return fmt.Errorf("translate Kimi thinking: %w", err)
 		}
@@ -560,30 +716,103 @@ func (s *Server) newReverseProxy(target *url.URL, thirdParty bool) *httputil.Rev
 			http.Error(w, "gateway upstream request failed", http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if !thirdParty || resp.StatusCode != http.StatusUnauthorized {
+			if !thirdParty {
 				return nil
 			}
-			if resp.Request == nil {
+			if resp.StatusCode == http.StatusUnauthorized && resp.Request != nil {
+				provider, ok := resp.Request.Context().Value(providerContextKey{}).(config.ProviderSpec)
+				if ok {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+					_ = resp.Body.Close()
+					payload := apiErrorPayload(providerauth.ErrorCode(provider.ID, "credentials_rejected"), providerauth.LoginMessage(provider, s.cfg.CLIProxyConfigPath, true))
+					resp.Body = io.NopCloser(bytes.NewReader(payload))
+					resp.StatusCode = http.StatusBadRequest
+					resp.Status = "400 Bad Request"
+					resp.ContentLength = int64(len(payload))
+					resp.Header.Set("Content-Type", "application/json")
+					resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+					return nil
+				}
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 				return nil
 			}
-			provider, ok := resp.Request.Context().Value(providerContextKey{}).(config.ProviderSpec)
-			if !ok {
+			if resp.Header.Get("Content-Encoding") != "" {
 				return nil
 			}
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-			_ = resp.Body.Close()
-			payload := apiErrorPayload(providerauth.ErrorCode(provider.ID, "credentials_rejected"), providerauth.LoginMessage(provider, s.cfg.CLIProxyConfigPath, true))
-			resp.Body = io.NopCloser(bytes.NewReader(payload))
-			resp.StatusCode = http.StatusBadRequest
-			resp.Status = "400 Bad Request"
-			resp.ContentLength = int64(len(payload))
-			resp.Header.Set("Content-Type", "application/json")
-			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+			resp.Body = sanitizeThirdPartySSE(resp.Body)
+			resp.ContentLength = -1
+			resp.Header.Del("Content-Length")
 			return nil
 		},
 		FlushInterval: -1,
 	}
 	return proxy
+}
+
+type sanitizingSSEBody struct {
+	*io.PipeReader
+	upstream io.Closer
+}
+
+func (b *sanitizingSSEBody) Close() error {
+	_ = b.upstream.Close()
+	return b.PipeReader.Close()
+}
+
+func sanitizeThirdPartySSE(upstream io.ReadCloser) io.ReadCloser {
+	reader, writer := io.Pipe()
+	go func() {
+		defer upstream.Close()
+		buffered := bufio.NewReader(upstream)
+		for {
+			line, readErr := buffered.ReadBytes('\n')
+			if len(line) > 0 {
+				line = sanitizeThirdPartySSELine(line)
+				if _, writeErr := writer.Write(line); writeErr != nil {
+					_ = writer.CloseWithError(writeErr)
+					return
+				}
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					_ = writer.Close()
+				} else {
+					_ = writer.CloseWithError(readErr)
+				}
+				return
+			}
+		}
+	}()
+	return &sanitizingSSEBody{PipeReader: reader, upstream: upstream}
+}
+
+func sanitizeThirdPartySSELine(line []byte) []byte {
+	trimmed := bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return line
+	}
+	data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return line
+	}
+	var event map[string]any
+	if json.Unmarshal(data, &event) != nil {
+		return line
+	}
+	response, ok := event["response"].(map[string]any)
+	if !ok {
+		return line
+	}
+	if _, exists := response["tools"]; !exists {
+		return line
+	}
+	response["tools"] = []any{}
+	rewritten, err := json.Marshal(event)
+	if err != nil {
+		return line
+	}
+	return append(append([]byte("data: "), rewritten...), '\n')
 }
 
 func writeProviderAuthError(w http.ResponseWriter, provider config.ProviderSpec, configPath string, rejected bool) {

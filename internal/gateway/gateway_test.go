@@ -235,21 +235,102 @@ func TestThirdPartyRouteStripsOAuthAndRewritesModel(t *testing.T) {
 	if _, exists := payload["reasoning"]; exists {
 		t.Fatalf("Codex reasoning object reached Kimi upstream: %s", payload["reasoning"])
 	}
-	var thinking struct {
-		Type   string `json:"type"`
-		Effort string `json:"effort"`
-	}
+	var thinking map[string]json.RawMessage
 	if err := json.Unmarshal(payload["thinking"], &thinking); err != nil {
 		t.Fatal(err)
 	}
-	if thinking.Type != "enabled" || thinking.Effort != "high" {
-		t.Fatalf("translated thinking = %#v", thinking)
+	var thinkingType string
+	if err := json.Unmarshal(thinking["type"], &thinkingType); err != nil {
+		t.Fatal(err)
+	}
+	if thinkingType != "disabled" {
+		t.Fatalf("translated thinking type = %q", thinkingType)
+	}
+	if _, exists := thinking["effort"]; exists {
+		t.Fatalf("Kimi thinking request contains unsupported effort: %s", payload["thinking"])
 	}
 	if officialCalled {
 		t.Fatal("official upstream was called for a prefixed model")
 	}
 	if recorder.Header().Get("X-Codex-Cliproxy-Request-ID") == "" {
 		t.Fatal("response has no request correlation id")
+	}
+}
+
+func TestThirdPartyRouteFiltersConfiguredAppNamespacesAndKeepsCoreTools(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Tools []struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"tools"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Tools) != 2 {
+			t.Fatalf("forwarded tools = %#v", payload.Tools)
+		}
+		for _, tool := range payload.Tools {
+			if strings.HasPrefix(tool.Name, "mcp__codex_apps__") {
+				t.Fatalf("excluded app namespace reached upstream: %#v", tool)
+			}
+		}
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	body := `{"model":"cliproxy/kimi-k3","input":"hello","tools":[{"type":"function","name":"exec_command"},{"type":"namespace","name":"mcp__codex_apps__notion","tools":[]},{"type":"namespace","name":"mcp__cua_repl","tools":[]}]}`
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(body))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestModelSwitchAnnotationAttributesEarlierAssistantToPreviousModel(t *testing.T) {
+	body := []byte(`{"model":"gpt-test","input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我是 Kimi"}]},{"type":"message","role":"developer","content":[{"type":"input_text","text":"<model_switch>\nThe user was previously using a different model.\nYou are Codex.\n</model_switch>"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"你是谁"}]}]}`)
+	rewritten, changed, err := annotateModelSwitch(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("model switch was not annotated")
+	}
+	if !bytes.Contains(rewritten, []byte(modelSwitchAttribution)) {
+		t.Fatalf("annotation missing: %s", rewritten)
+	}
+	if !bytes.Contains(rewritten, []byte("我是 Kimi")) {
+		t.Fatalf("visible assistant context changed: %s", rewritten)
+	}
+	rewrittenAgain, changedAgain, err := annotateModelSwitch(rewritten)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedAgain || !bytes.Equal(rewrittenAgain, rewritten) {
+		t.Fatalf("annotation is not idempotent: %s", rewrittenAgain)
+	}
+}
+
+func TestThirdPartySSEOmitsEchoedToolSchemasAndPreservesOutput(t *testing.T) {
+	input := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_1","tools":[{"type":"function","name":"large","description":"schema"}],"output":[]}}` + "\n\n" +
+		`data: {"type":"response.output_text.delta","delta":"OK"}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_1","tools":[{"type":"function","name":"large"}],"output":[{"type":"message"}]}}` + "\n\n"
+	body := sanitizeThirdPartySSE(io.NopCloser(strings.NewReader(input)))
+	defer body.Close()
+	output, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output, []byte(`"name":"large"`)) || bytes.Contains(output, []byte(`"description":"schema"`)) {
+		t.Fatalf("echoed tool schema was preserved: %s", output)
+	}
+	if !bytes.Contains(output, []byte(`"delta":"OK"`)) || !bytes.Contains(output, []byte(`"output":[{"type":"message"}]`)) {
+		t.Fatalf("response output changed: %s", output)
 	}
 }
 

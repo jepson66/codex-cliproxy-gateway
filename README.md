@@ -113,8 +113,6 @@ openai-compatibility:
         max-context-length: 1048576
         input-modalities: [text, image]
         output-modalities: [text]
-        thinking:
-          levels: [low, high, max]
 ```
 
 Never commit this file or paste a real key into an issue. The Kimi provider key
@@ -156,8 +154,11 @@ model and reasoning control beneath the composer to choose
 `cliproxy/kimi-k3`. Official GPT models remain in the same picker. The OAuth
 path has been verified with this 1M-context model and requires an eligible Kimi
 membership. The 256K alias is intentionally omitted: a normal Codex request can
-exceed that limit after tool schemas are included. Kimi reasoning levels are
-translated to its native `thinking` protocol.
+exceed that limit after tool schemas are included. Kimi does not expose Codex
+reasoning-effort levels; the Gateway uses Kimi's non-thinking mode and does not
+send an `effort` tier. To avoid sending hundreds of thousands of unrelated
+tokens, Kimi requests omit Codex Connected Apps schemas while retaining core
+coding, browser, MCP, image, and multi-agent tools.
 
 See [OpenAI's model selection documentation](https://learn.chatgpt.com/docs/models#choose-a-model)
 for the current Desktop control.

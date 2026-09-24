@@ -48,9 +48,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 		t.Fatalf("official entries changed: %#v", doc.Models[:2])
 	}
 	wantLevels := []map[string]string{
-		{"effort": "low", "description": "Reasoning effort: low"},
-		{"effort": "high", "description": "Reasoning effort: high"},
-		{"effort": "max", "description": "Reasoning effort: max"},
+		{"effort": "none", "description": "The upstream model manages reasoning automatically"},
 	}
 	for index, slug := range []string{"cliproxy/kimi-k3"} {
 		kimi := doc.Models[2+index]
@@ -61,7 +59,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 		if !ok || !reflect.DeepEqual(levels, wantLevels) {
 			t.Fatalf("Kimi reasoning levels = %#v", kimi["supported_reasoning_levels"])
 		}
-		if kimi["default_reasoning_level"] != "high" {
+		if kimi["default_reasoning_level"] != "none" {
 			t.Fatalf("Kimi default reasoning = %#v", kimi["default_reasoning_level"])
 		}
 		if _, ok := kimi["custom"]; ok {

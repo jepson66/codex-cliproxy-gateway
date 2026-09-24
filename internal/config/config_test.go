@@ -38,11 +38,14 @@ func TestDefaultKimiCodeModels(t *testing.T) {
 		if model.ProviderID != "kimi-code" {
 			t.Fatalf("model %q provider = %q", model.ID, model.ProviderID)
 		}
-		if !reflect.DeepEqual(model.ReasoningLevels, []string{"low", "high", "max"}) {
+		if !reflect.DeepEqual(model.ReasoningLevels, []string{"none"}) {
 			t.Fatalf("model %q reasoning levels = %#v", model.ID, model.ReasoningLevels)
 		}
-		if model.DefaultReasoningLevel != "high" {
+		if model.DefaultReasoningLevel != "none" {
 			t.Fatalf("model %q default reasoning = %q", model.ID, model.DefaultReasoningLevel)
+		}
+		if !reflect.DeepEqual(model.ExcludedToolNamespacePrefixes, []string{"mcp__codex_apps__"}) {
+			t.Fatalf("model %q excluded tool namespaces = %#v", model.ID, model.ExcludedToolNamespacePrefixes)
 		}
 	}
 }
@@ -81,6 +84,46 @@ func TestLoadRemovesDeprecatedBundledKimi256KModel(t *testing.T) {
 	}
 	if len(loaded.Models) != 1 || loaded.Models[0].ID != "kimi-k3" {
 		t.Fatalf("models after migration = %#v", loaded.Models)
+	}
+}
+
+func TestLoadNormalizesLegacyKimiReasoningLevels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.json")
+	data := []byte(`{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "kimi-k3",
+      "provider_id": "kimi-code",
+      "upstream_model": "kimi-k3",
+      "wire_api": "responses",
+      "context_window": 1048576,
+      "input_modalities": ["text"],
+      "output_modalities": ["text"],
+      "reasoning_levels": ["low", "high", "max"],
+      "default_reasoning_level": "high",
+      "reasoning_wire_format": "kimi-thinking",
+      "capabilities": {"streaming": true, "tools": true}
+    }
+  ]
+}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Models) != 1 {
+		t.Fatalf("loaded models = %#v", loaded.Models)
+	}
+	model := loaded.Models[0]
+	if !reflect.DeepEqual(model.ReasoningLevels, []string{"none"}) || model.DefaultReasoningLevel != "none" {
+		t.Fatalf("Kimi reasoning was not normalized: levels=%#v default=%q", model.ReasoningLevels, model.DefaultReasoningLevel)
+	}
+	if !reflect.DeepEqual(model.ExcludedToolNamespacePrefixes, []string{"mcp__codex_apps__"}) {
+		t.Fatalf("Kimi excluded tool namespaces were not migrated: %#v", model.ExcludedToolNamespacePrefixes)
 	}
 }
 

@@ -105,8 +105,6 @@ openai-compatibility:
         max-context-length: 1048576
         input-modalities: [text, image]
         output-modalities: [text]
-        thinking:
-          levels: [low, high, max]
 ```
 
 不要提交此配置文件或在 Issue 中粘贴真实 Key。Kimi 提供商密钥与本地
@@ -146,8 +144,10 @@ codex-cliproxy-gateway doctor --e2e --model cliproxy/kimi-k3
 **Codex CLI：** 重新启动 Codex，输入 `/model`，选择
 `cliproxy/kimi-k3`。官方 GPT 模型仍在同一个选择器中。OAuth 路径已用这个 1M
 上下文模型验证，需要对应 Kimi 会员档位。默认不再提供 256K 别名，因为 Codex
-加入工具 schema 后，正常请求也可能超过该模型上限。Kimi 的 reasoning 档位会
-转换成其原生 `thinking` 协议。
+加入工具 schema 后，正常请求也可能超过该模型上限。Kimi 不提供 Codex 的
+reasoning 档位；Gateway 使用 Kimi 的非思考模式，不发送 `effort` 等级。为避免
+无关 schema 消耗数十万 token，Kimi 请求默认排除 Codex Connected Apps，保留
+核心编码、浏览器、MCP、图片和多 Agent 工具。
 
 Desktop 当前入口可参考
 [OpenAI 模型选择文档](https://learn.chatgpt.com/docs/models#choose-a-model)。

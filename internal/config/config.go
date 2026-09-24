@@ -47,21 +47,22 @@ type ProviderSpec struct {
 }
 
 type ModelSpec struct {
-	ID                    string             `json:"id"`
-	DisplayName           string             `json:"display_name"`
-	Description           string             `json:"description,omitempty"`
-	ProviderID            string             `json:"provider_id,omitempty"`
-	Route                 string             `json:"route,omitempty"`
-	UpstreamModel         string             `json:"upstream_model,omitempty"`
-	WireAPI               string             `json:"wire_api,omitempty"`
-	ContextWindow         int64              `json:"context_window,omitempty"`
-	InputModalities       []string           `json:"input_modalities,omitempty"`
-	OutputModalities      []string           `json:"output_modalities,omitempty"`
-	ReasoningLevels       []string           `json:"reasoning_levels,omitempty"`
-	DefaultReasoningLevel string             `json:"default_reasoning_level,omitempty"`
-	ReasoningWireFormat   string             `json:"reasoning_wire_format,omitempty"`
-	Capabilities          ModelCapabilities  `json:"capabilities"`
-	Compatibility         ModelCompatibility `json:"compatibility,omitempty"`
+	ID                            string             `json:"id"`
+	DisplayName                   string             `json:"display_name"`
+	Description                   string             `json:"description,omitempty"`
+	ProviderID                    string             `json:"provider_id,omitempty"`
+	Route                         string             `json:"route,omitempty"`
+	UpstreamModel                 string             `json:"upstream_model,omitempty"`
+	WireAPI                       string             `json:"wire_api,omitempty"`
+	ContextWindow                 int64              `json:"context_window,omitempty"`
+	InputModalities               []string           `json:"input_modalities,omitempty"`
+	OutputModalities              []string           `json:"output_modalities,omitempty"`
+	ReasoningLevels               []string           `json:"reasoning_levels,omitempty"`
+	DefaultReasoningLevel         string             `json:"default_reasoning_level,omitempty"`
+	ReasoningWireFormat           string             `json:"reasoning_wire_format,omitempty"`
+	ExcludedToolNamespacePrefixes []string           `json:"excluded_tool_namespace_prefixes,omitempty"`
+	Capabilities                  ModelCapabilities  `json:"capabilities"`
+	Compatibility                 ModelCompatibility `json:"compatibility,omitempty"`
 }
 
 type Sidecar struct {
@@ -131,9 +132,12 @@ func Default() Config {
 				ContextWindow:         1_048_576,
 				InputModalities:       []string{"text", "image"},
 				OutputModalities:      []string{"text"},
-				ReasoningLevels:       []string{"low", "high", "max"},
-				DefaultReasoningLevel: "high",
+				ReasoningLevels:       []string{"none"},
+				DefaultReasoningLevel: "none",
 				ReasoningWireFormat:   "kimi-thinking",
+				ExcludedToolNamespacePrefixes: []string{
+					"mcp__codex_apps__",
+				},
 				Capabilities: ModelCapabilities{
 					Streaming: true,
 					Tools:     true,
@@ -244,6 +248,16 @@ func (c *Config) applyDefaults(legacySchema bool) {
 		}
 		if model.ReasoningWireFormat == "" && model.ProviderID == "kimi-code" {
 			model.ReasoningWireFormat = "kimi-thinking"
+		}
+		if model.ProviderID == "kimi-code" {
+			// Kimi exposes native thinking as a single provider-managed mode, not
+			// Codex-style effort tiers. Normalize older generated configs so an
+			// existing installation no longer advertises Low/High/Max.
+			model.ReasoningLevels = []string{"none"}
+			model.DefaultReasoningLevel = "none"
+			if model.ExcludedToolNamespacePrefixes == nil {
+				model.ExcludedToolNamespacePrefixes = []string{"mcp__codex_apps__"}
+			}
 		}
 		if legacySchema {
 			model.Capabilities.Streaming = true
