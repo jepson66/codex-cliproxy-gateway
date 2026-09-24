@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -242,8 +243,19 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
+	officialBody, changed, err := sanitizeOfficialReasoning(routingBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !changed {
+		officialBody = body
+	} else {
+		r.Header.Del("Content-Encoding")
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(officialBody)))
+	}
+	r.Body = io.NopCloser(bytes.NewReader(officialBody))
+	r.ContentLength = int64(len(officialBody))
 	s.serveLogged(w, r, s.official, "official", model)
 }
 
@@ -337,6 +349,9 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	}
 	rewrittenModel, _ := json.Marshal(spec.UpstreamModel)
 	payload["model"] = rewrittenModel
+	if adaptErr := dropUnsupportedThirdPartyInput(payload); adaptErr != nil {
+		return model, nil, false, adaptErr
+	}
 	if adaptErr := adaptReasoning(payload, spec); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
@@ -345,6 +360,119 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 		return model, nil, false, fmt.Errorf("rewrite model: %w", err)
 	}
 	return model, rewritten, true, nil
+}
+
+// dropUnsupportedThirdPartyInput removes provider-private Codex state that is
+// not part of the portable visible conversation. In particular, compaction is
+// an encrypted OpenAI item; Kimi rejects the item type before it can process the
+// remaining messages.
+func dropUnsupportedThirdPartyInput(payload map[string]json.RawMessage) error {
+	rawInput, exists := payload["input"]
+	if !exists || len(bytes.TrimSpace(rawInput)) == 0 || bytes.Equal(bytes.TrimSpace(rawInput), []byte("null")) {
+		return nil
+	}
+	var input []json.RawMessage
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return nil
+	}
+	filtered := make([]json.RawMessage, 0, len(input))
+	changed := false
+	for _, rawItem := range input {
+		var item struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(rawItem, &item); err == nil && item.Type == "compaction" {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, rawItem)
+	}
+	if !changed {
+		return nil
+	}
+	normalizedInput, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("filter unsupported third-party input: %w", err)
+	}
+	payload["input"] = normalizedInput
+	return nil
+}
+
+// sanitizeOfficialReasoning removes reasoning items whose encrypted payload is
+// not shaped like an OpenAI/Codex Fernet token. Third-party providers can emit
+// Responses-compatible reasoning items, but their opaque encrypted_content is
+// provider-specific and the official endpoint rejects it before processing the
+// otherwise compatible visible conversation history.
+func sanitizeOfficialReasoning(body []byte) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body, false, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false, fmt.Errorf("request body must be JSON: %w", err)
+	}
+	rawInput, exists := payload["input"]
+	if !exists || len(bytes.TrimSpace(rawInput)) == 0 || bytes.Equal(bytes.TrimSpace(rawInput), []byte("null")) {
+		return body, false, nil
+	}
+	var input []json.RawMessage
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		// The Responses API also accepts a string input. Only item arrays can
+		// contain replayed reasoning, so leave every other valid input shape as-is.
+		return body, false, nil
+	}
+
+	filtered := make([]json.RawMessage, 0, len(input))
+	changed := false
+	for _, rawItem := range input {
+		var item struct {
+			Type             string  `json:"type"`
+			EncryptedContent *string `json:"encrypted_content"`
+		}
+		if err := json.Unmarshal(rawItem, &item); err != nil || item.Type != "reasoning" {
+			filtered = append(filtered, rawItem)
+			continue
+		}
+		if item.EncryptedContent != nil && isValidGPTReasoningEncryptedContent(*item.EncryptedContent) {
+			filtered = append(filtered, rawItem)
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return body, false, nil
+	}
+	normalizedInput, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, false, fmt.Errorf("filter incompatible reasoning input: %w", err)
+	}
+	payload["input"] = normalizedInput
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, fmt.Errorf("rewrite official request: %w", err)
+	}
+	return rewritten, true, nil
+}
+
+// isValidGPTReasoningEncryptedContent performs a transport-shape check for the
+// Fernet-like envelope used by GPT/Codex. It cannot prove decryptability, but it
+// reliably rejects opaque Kimi and other provider signatures while preserving
+// official GPT reasoning across normal GPT-to-GPT turns.
+func isValidGPTReasoningEncryptedContent(raw string) bool {
+	const maxSignatureLen = 32 << 20
+	signature := strings.TrimSpace(raw)
+	if signature == "" || len(signature) > maxSignatureLen || !strings.HasPrefix(signature, "gAAAA") {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil {
+		decoded, err = base64.URLEncoding.DecodeString(signature)
+	}
+	if err != nil || len(decoded) < 73 || decoded[0] != 0x80 {
+		return false
+	}
+	ciphertextLen := len(decoded) - 1 - 8 - 16 - 32
+	return ciphertextLen > 0 && ciphertextLen%16 == 0
 }
 
 func adaptReasoning(payload map[string]json.RawMessage, spec config.ModelSpec) error {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -68,6 +69,110 @@ func TestOfficialRoutePreservesOAuthAndStreams(t *testing.T) {
 	}
 	if cliproxyCalled {
 		t.Fatal("CLIProxyAPI was called for an official model")
+	}
+}
+
+func TestKimiToOfficialDropsForeignReasoningAndPreservesVisibleContext(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	officialBody := make(chan []byte, 1)
+	server.official.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		officialBody <- body
+		if bytes.Contains(body, []byte(`"type":"reasoning"`)) {
+			return testResponse(http.StatusBadRequest, "application/json", `{"detail":"The encrypted content for item rs_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed."}`), nil
+		}
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	first, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{
+		"model":"cliproxy/kimi-k3",
+		"prompt_cache_key":"desktop-session-1",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}]
+	}`))
+	firstRecorder := newResponseRecorder()
+	server.Handler().ServeHTTP(firstRecorder, first)
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("Kimi status = %d, body = %s", firstRecorder.Code, firstRecorder.Body.String())
+	}
+
+	second, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(`{
+		"model":"gpt-test",
+		"prompt_cache_key":"desktop-session-1",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},
+			{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"foreign-encrypted-value"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible Kimi reply"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}
+		]
+	}`))
+	secondRecorder := newResponseRecorder()
+	server.Handler().ServeHTTP(secondRecorder, second)
+	if secondRecorder.Code != http.StatusOK {
+		t.Fatalf("official status = %d, body = %s", secondRecorder.Code, secondRecorder.Body.String())
+	}
+
+	forwarded := <-officialBody
+	if bytes.Contains(forwarded, []byte(`"type":"reasoning"`)) || bytes.Contains(forwarded, []byte("foreign-encrypted-value")) {
+		t.Fatalf("foreign reasoning reached official upstream: %s", forwarded)
+	}
+	for _, visible := range []string{"first", "visible Kimi reply", "second"} {
+		if !bytes.Contains(forwarded, []byte(visible)) {
+			t.Fatalf("visible context %q was removed: %s", visible, forwarded)
+		}
+	}
+}
+
+func TestOfficialRoutePreservesValidGPTReasoning(t *testing.T) {
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	validEncryptedContent := validGPTReasoningEncryptedContent()
+	server.official.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		if !bytes.Contains(body, []byte(validEncryptedContent)) {
+			t.Fatalf("valid GPT reasoning was removed: %s", body)
+		}
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	body := `{"model":"gpt-test","input":[{"type":"reasoning","id":"rs_gpt","summary":[],"encrypted_content":"` + validEncryptedContent + `"}]}`
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(body))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestThirdPartyRouteDropsUnsupportedCompactionAndKeepsOtherContext(t *testing.T) {
+	t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
+	server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+	server.cliproxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte(`"type":"compaction"`)) {
+			return testResponse(http.StatusBadRequest, "application/json", `{"error":{"message":"invalid_request_error: input.1: item type \"compaction\" is not supported"}}`), nil
+		}
+		if !bytes.Contains(body, []byte(`"type":"reasoning"`)) || !bytes.Contains(body, []byte("gpt-encrypted-value")) {
+			t.Fatalf("reasoning input was unexpectedly removed from third-party route: %s", body)
+		}
+		for _, visible := range []string{"before compaction", "after compaction"} {
+			if !bytes.Contains(body, []byte(visible)) {
+				t.Fatalf("visible context %q was removed: %s", visible, body)
+			}
+		}
+		return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+	})
+
+	body := `{"model":"cliproxy/kimi-k3","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"before compaction"}]},{"type":"compaction","id":"cmp_gpt","encrypted_content":"official-compaction"},{"type":"reasoning","id":"rs_gpt","summary":[],"encrypted_content":"gpt-encrypted-value"},{"type":"message","role":"user","content":[{"type":"input_text","text":"after compaction"}]}]}`
+	request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader(body))
+	recorder := newResponseRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -386,6 +491,36 @@ func TestZstdRoutingPassesOfficialThroughAndDecodesThirdParty(t *testing.T) {
 		}
 	})
 
+	t.Run("official with incompatible reasoning", func(t *testing.T) {
+		received := make(chan receivedRequest, 1)
+		server := newTestServer(t, "https://official.test/backend-api/codex", "http://cliproxy.test/v1")
+		server.decodeZstd = func(body []byte) ([]byte, error) {
+			if string(body) != "compressed-official-with-kimi-reasoning" {
+				t.Fatalf("compressed body = %q", body)
+			}
+			return []byte(`{"model":"gpt-test","input":[{"type":"reasoning","id":"rs_kimi","encrypted_content":"foreign"},{"type":"message","role":"user","content":[{"type":"input_text","text":"visible"}]}]}`), nil
+		}
+		server.official.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(r.Body)
+			received <- receivedRequest{path: r.URL.Path, header: r.Header.Clone(), body: body}
+			return testResponse(http.StatusOK, "text/event-stream", "data: ok\n\n"), nil
+		})
+		request, _ := http.NewRequest(http.MethodPost, "http://gateway.test/v1/responses", strings.NewReader("compressed-official-with-kimi-reasoning"))
+		request.Header.Set("Content-Encoding", "zstd")
+		recorder := newResponseRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		upstream := <-received
+		if got := upstream.header.Get("Content-Encoding"); got != "" {
+			t.Fatalf("official sanitized Content-Encoding = %q", got)
+		}
+		if bytes.Contains(upstream.body, []byte(`"type":"reasoning"`)) {
+			t.Fatalf("foreign reasoning reached official upstream: %s", upstream.body)
+		}
+		if !bytes.Contains(upstream.body, []byte("visible")) {
+			t.Fatalf("visible context was removed: %s", upstream.body)
+		}
+	})
+
 	t.Run("third party", func(t *testing.T) {
 		t.Setenv("CLIPROXY_API_KEY", "local-proxy-key")
 		received := make(chan receivedRequest, 1)
@@ -446,6 +581,12 @@ func testResponse(status int, contentType, body string) *http.Response {
 		Header:     header,
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
+}
+
+func validGPTReasoningEncryptedContent() string {
+	decoded := make([]byte, 73)
+	decoded[0] = 0x80
+	return base64.RawURLEncoding.EncodeToString(decoded)
 }
 
 type responseRecorder struct {
