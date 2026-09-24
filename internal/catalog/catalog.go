@@ -110,11 +110,14 @@ func thirdPartyModelMessages(value any) map[string]any {
 		}
 	}
 	instructions, _ := messages["instructions_template"].(string)
-	filtered["instructions_template"] = thirdPartyInstructions(instructions)
+	filtered["instructions_template"] = SanitizeThirdPartyInstructions(instructions)
 	return filtered
 }
 
-func thirdPartyInstructions(instructions string) string {
+// SanitizeThirdPartyInstructions removes identity claims that belong to an
+// official Codex/GPT model while preserving provider-neutral host behavior.
+// It intentionally does not add a replacement model or provider identity.
+func SanitizeThirdPartyInstructions(instructions string) string {
 	if instructions == "" {
 		return ""
 	}

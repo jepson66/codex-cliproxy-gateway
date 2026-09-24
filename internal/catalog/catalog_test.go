@@ -101,7 +101,7 @@ func TestGeneratePreservesOfficialModelsAndAddsKimiCode(t *testing.T) {
 
 func TestThirdPartyInstructionsPreserveUnknownTemplatePreamble(t *testing.T) {
 	input := "Follow the host security policy exactly.\n\nAs Codex, keep working until the task is complete."
-	got := thirdPartyInstructions(input)
+	got := SanitizeThirdPartyInstructions(input)
 	want := "Follow the host security policy exactly.\n\nAs an AI coding agent, keep working until the task is complete."
 	if got != want {
 		t.Fatalf("third-party instructions = %q, want %q", got, want)

@@ -379,6 +379,15 @@ func routeBody(body []byte, prefix string, models map[string]config.ModelSpec) (
 	}
 	rewrittenModel, _ := json.Marshal(spec.UpstreamModel)
 	payload["model"] = rewrittenModel
+	if rawInstructions, exists := payload["instructions"]; exists {
+		var instructions string
+		if json.Unmarshal(rawInstructions, &instructions) == nil {
+			sanitized := catalog.SanitizeThirdPartyInstructions(instructions)
+			if sanitized != instructions {
+				payload["instructions"], _ = json.Marshal(sanitized)
+			}
+		}
+	}
 	if adaptErr := dropUnsupportedThirdPartyInput(payload); adaptErr != nil {
 		return model, nil, false, adaptErr
 	}
